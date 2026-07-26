@@ -304,6 +304,18 @@ SCORER_THRESHOLDS = {
     "NON_COMPLIANT": lambda s: s < 35,
 }
 
+CONTROL_FOR_DOC = {
+    "pc1_compliant":    "PC1",
+    "pc1_partial":      "PC1",
+    "pc1_noncompliant": "PC1",
+    "pc2_compliant":    "PC2",
+    "pc2_partial":      "PC2",
+    "pc2_noncompliant": "PC2",
+    "pc3_compliant":    "PC3",
+    "pc3_partial":      "PC3",
+    "pc3_noncompliant": "PC3",
+}
+
 def score_to_label_scorer(score: float) -> str:
     if score >= 65:
         return "COMPLIANT"
@@ -320,292 +332,286 @@ def section(title: str) -> None:
     print(f"  {title}")
     print(f"{'-'*60}")
 
-failures: list[str] = []
 
-# ---------------------------------------------------------------------------
-# STEP 2 — Labeling functions isolation test
-# ---------------------------------------------------------------------------
+def main() -> None:
+    failures: list[str] = []
 
-section("STEP 2 — Labeling Functions (isolation test)")
+    # ---------------------------------------------------------------------------
+    # STEP 2 — Labeling functions isolation test
+    # ---------------------------------------------------------------------------
 
-lf_passes = 0
-lf_total  = 9
+    section("STEP 2 — Labeling Functions (isolation test)")
 
-try:
-    from labeling_functions import (
-        LFS_PC1, LFS_PC2, LFS_PC3,
-        score_chunk,
-    )
-    print("  Import OK: labeling_functions")
-except ImportError as e:
-    print(f"  IMPORT ERROR: {e}")
-    print("  FIX: ensure scripts/ is in PYTHONPATH or run from repo root")
-    sys.exit(1)
+    lf_passes = 0
+    lf_total  = 9
 
-LF_GROUPS = {
-    "PC1": LFS_PC1,
-    "PC2": LFS_PC2,
-    "PC3": LFS_PC3,
-}
-
-DOC_PREFIX_MAP = {
-    "pc1_compliant":    ("PC1", "COMPLIANT"),
-    "pc1_partial":      ("PC1", "PARTIAL"),
-    "pc1_noncompliant": ("PC1", "NON_COMPLIANT"),
-    "pc2_compliant":    ("PC2", "COMPLIANT"),
-    "pc2_partial":      ("PC2", "PARTIAL"),
-    "pc2_noncompliant": ("PC2", "NON_COMPLIANT"),
-    "pc3_compliant":    ("PC3", "COMPLIANT"),
-    "pc3_partial":      ("PC3", "PARTIAL"),
-    "pc3_noncompliant": ("PC3", "NON_COMPLIANT"),
-}
-
-print(f"\n  {'Doc':<22} {'Group':<5} {'Score':>6}  {'Expected':<14} {'Result'}")
-print(f"  {'-'*22} {'-'*5} {'-'*6}  {'-'*14} {'-'*6}")
-
-for doc_name, (group, expected) in DOC_PREFIX_MAP.items():
-    text  = TEST_DOCS[doc_name]
-    lfs   = LF_GROUPS[group]
-    score = score_chunk(text, lfs)
-    ok    = LF_THRESHOLDS[expected](score)
-    status = "PASS" if ok else "FAIL"
-    if ok:
-        lf_passes += 1
-    else:
-        failures.append(
-            f"LF [{doc_name}]: expected {expected} (threshold), got score={score:.3f}"
+    try:
+        from labeling_functions import (
+            LFS_PC1, LFS_PC2, LFS_PC3,
+            score_chunk,
         )
-    print(f"  {doc_name:<22} {group:<5} {score:>6.3f}  {expected:<14} {status}")
+        print("  Import OK: labeling_functions")
+    except ImportError as e:
+        print(f"  IMPORT ERROR: {e}")
+        print("  FIX: ensure scripts/ is in PYTHONPATH or run from repo root")
+        sys.exit(1)
 
-print(f"\n  Labeling Functions: {lf_passes}/{lf_total} PASS")
+    LF_GROUPS = {
+        "PC1": LFS_PC1,
+        "PC2": LFS_PC2,
+        "PC3": LFS_PC3,
+    }
 
-# ---------------------------------------------------------------------------
-# STEP 3 — BM25 index end-to-end
-# ---------------------------------------------------------------------------
+    DOC_PREFIX_MAP = {
+        "pc1_compliant":    ("PC1", "COMPLIANT"),
+        "pc1_partial":      ("PC1", "PARTIAL"),
+        "pc1_noncompliant": ("PC1", "NON_COMPLIANT"),
+        "pc2_compliant":    ("PC2", "COMPLIANT"),
+        "pc2_partial":      ("PC2", "PARTIAL"),
+        "pc2_noncompliant": ("PC2", "NON_COMPLIANT"),
+        "pc3_compliant":    ("PC3", "COMPLIANT"),
+        "pc3_partial":      ("PC3", "PARTIAL"),
+        "pc3_noncompliant": ("PC3", "NON_COMPLIANT"),
+    }
 
-section("STEP 3 — BM25 Retrieval (end-to-end)")
+    print(f"\n  {'Doc':<22} {'Group':<5} {'Score':>6}  {'Expected':<14} {'Result'}")
+    print(f"  {'-'*22} {'-'*5} {'-'*6}  {'-'*14} {'-'*6}")
 
-bm25_passes = 0
-bm25_total  = 3
-
-try:
-    import nciipc_cpp
-    print("  Import OK: nciipc_cpp")
-except ImportError as e:
-    print(f"  IMPORT ERROR: {e}")
-    print(f"  FIX: ensure {BUILD_DIR} contains nciipc_cpp.pyd")
-    sys.exit(1)
-
-# Build index on all 9 docs
-all_texts = list(TEST_DOCS.values())
-print(f"\n  Building BM25 index on {len(all_texts)} synthetic documents …")
-nciipc_cpp.build_index(all_texts)
-chunk_count = nciipc_cpp.get_chunk_count()
-print(f"  Chunks indexed: {chunk_count}  (expect 9–50)")
-
-BM25_QUERIES = [
-    "CII asset register six criteria SCADA OT identification",
-    "vertical horizontal interdependency matrix inbound outbound",
-    "CISO reports head organisation ISD SOC 24x7 independent audit",
-]
-
-print(f"\n  {'#':<3} {'Query (first 55 chars)':<55} {'Top result (first 100 chars)'}")
-print(f"  {'-'*3} {'-'*55} {'-'*40}")
-
-for i, query in enumerate(BM25_QUERIES, 1):
-    results = nciipc_cpp.query_bm25(query, 3)
-    if results and results[0][1] > 0.0:
-        top_text = nciipc_cpp.get_chunk_text(results[0][0])[:100].replace("\n", " ")
-        print(f"  {i:<3} {query[:55]:<55} \"{top_text}\"")
-        bm25_passes += 1
-    else:
-        print(f"  {i:<3} {query[:55]:<55} NO RESULTS — FAIL")
-        failures.append(f"BM25 query {i} returned no results: '{query[:50]}'")
-
-print(f"\n  BM25 Retrieval: {bm25_passes}/{bm25_total} PASS")
-
-# ---------------------------------------------------------------------------
-# STEP 4 — scorer.py end-to-end
-# ---------------------------------------------------------------------------
-
-section("STEP 4 — Scorer (end-to-end, one doc at a time)")
-
-scorer_passes = 0
-scorer_total  = 9
-
-try:
-    from scorer import score_documents
-    print("  Import OK: scorer.score_documents")
-except ImportError as e:
-    print(f"  IMPORT ERROR: {e}")
-    print("  FIX: ensure scripts/ is in PYTHONPATH or run from repo root")
-    sys.exit(1)
-
-CONTROL_FOR_DOC = {
-    "pc1_compliant":    "PC1",
-    "pc1_partial":      "PC1",
-    "pc1_noncompliant": "PC1",
-    "pc2_compliant":    "PC2",
-    "pc2_partial":      "PC2",
-    "pc2_noncompliant": "PC2",
-    "pc3_compliant":    "PC3",
-    "pc3_partial":      "PC3",
-    "pc3_noncompliant": "PC3",
-}
-
-print(f"\n  {'Doc':<22} {'Ctrl':<5} {'Score':>6}  {'Expected':<14} {'Predicted':<14} {'Result'}")
-print(f"  {'-'*22} {'-'*5} {'-'*6}  {'-'*14} {'-'*14} {'-'*6}")
-
-for doc_name, expected in EXPECTED_LABELS.items():
-    control = CONTROL_FOR_DOC[doc_name]
-    text    = TEST_DOCS[doc_name]
-
-    result    = score_documents([text])
-    score_val = result[control]["score"]
-    predicted = score_to_label_scorer(score_val)
-    ok        = predicted == expected
-    status    = "PASS" if ok else "FAIL"
-
-    if ok:
-        scorer_passes += 1
-    else:
-        failures.append(
-            f"Scorer [{doc_name}]: expected {expected}, got {predicted} (score={score_val:.1f})"
-        )
-    print(f"  {doc_name:<22} {control:<5} {score_val:>6.1f}  {expected:<14} {predicted:<14} {status}")
-
-print(f"\n  Scorer: {scorer_passes}/{scorer_total} PASS")
-
-# ---------------------------------------------------------------------------
-# STEP 5 — explain.py (OpenRouter)
-# ---------------------------------------------------------------------------
-
-section("STEP 5 — Explain (OpenRouter)")
-
-explain_status = "SKIP"
-explain_detail = "Not attempted"
-
-try:
-    import openai  # noqa: F401 — check availability before importing generate_report
-    from explain import generate_report
-
-    print("  Import OK: openai, explain.generate_report")
-    print("  Running scorer on all 9 docs combined …")
-    combined_result = score_documents(all_texts)
-
-    scores_path = PROCESSED_DIR / "scores.json"
-    with open(scores_path, "w", encoding="utf-8") as fh:
-        json.dump(combined_result, fh, indent=2)
-    print(f"  Scores saved → {scores_path}")
-
-    print("  Calling generate_report() — this may take 30–90 seconds …")
-    generate_report(str(scores_path))
-
-    # Verify audit_report.json
-    report_path = PROCESSED_DIR / "audit_report.json"
-    if not report_path.exists():
-        raise FileNotFoundError(f"audit_report.json not created at {report_path}")
-
-    with open(report_path, encoding="utf-8") as fh:
-        report = json.load(fh)
-
-    all_findings_ok = True
-    for ctrl in ("PC1", "PC2", "PC3"):
-        finding = report.get("findings", {}).get(ctrl, "")
-        if not finding or len(finding) < 50:
-            all_findings_ok = False
+    for doc_name, (group, expected) in DOC_PREFIX_MAP.items():
+        text  = TEST_DOCS[doc_name]
+        lfs   = LF_GROUPS[group]
+        score = score_chunk(text, lfs)
+        ok    = LF_THRESHOLDS[expected](score)
+        status = "PASS" if ok else "FAIL"
+        if ok:
+            lf_passes += 1
+        else:
             failures.append(
-                f"Explain [{ctrl}]: finding missing or too short ({len(finding)} chars)"
+                f"LF [{doc_name}]: expected {expected} (threshold), got score={score:.3f}"
             )
+        print(f"  {doc_name:<22} {group:<5} {score:>6.3f}  {expected:<14} {status}")
 
-    if all_findings_ok:
-        explain_status = "PASS"
-        explain_detail = "audit_report.json created; all findings ≥ 50 chars"
-    else:
-        explain_status = "FAIL"
-        explain_detail = "One or more findings are empty or too short"
+    print(f"\n  Labeling Functions: {lf_passes}/{lf_total} PASS")
 
-except (openai.APIConnectionError, ConnectionError, ConnectionRefusedError, OSError) as e:
+    # ---------------------------------------------------------------------------
+    # STEP 3 — BM25 index end-to-end
+    # ---------------------------------------------------------------------------
+
+    section("STEP 3 — BM25 Retrieval (end-to-end)")
+
+    bm25_passes = 0
+    bm25_total  = 3
+
+    try:
+        import nciipc_cpp
+        print("  Import OK: nciipc_cpp")
+    except ImportError as e:
+        print(f"  IMPORT ERROR: {e}")
+        print(f"  FIX: ensure {BUILD_DIR} contains nciipc_cpp.pyd")
+        sys.exit(1)
+
+    # Build index on all 9 docs
+    all_texts = list(TEST_DOCS.values())
+    print(f"\n  Building BM25 index on {len(all_texts)} synthetic documents …")
+    nciipc_cpp.build_index(all_texts)
+    chunk_count = nciipc_cpp.get_chunk_count()
+    print(f"  Chunks indexed: {chunk_count}  (expect 9–50)")
+
+    BM25_QUERIES = [
+        "CII asset register six criteria SCADA OT identification",
+        "vertical horizontal interdependency matrix inbound outbound",
+        "CISO reports head organisation ISD SOC 24x7 independent audit",
+    ]
+
+    print(f"\n  {'#':<3} {'Query (first 55 chars)':<55} {'Top result (first 100 chars)'}")
+    print(f"  {'-'*3} {'-'*55} {'-'*40}")
+
+    for i, query in enumerate(BM25_QUERIES, 1):
+        results = nciipc_cpp.query_bm25(query, 3)
+        if results and results[0][1] > 0.0:
+            top_text = nciipc_cpp.get_chunk_text(results[0][0])[:100].replace("\n", " ")
+            print(f"  {i:<3} {query[:55]:<55} \"{top_text}\"")
+            bm25_passes += 1
+        else:
+            print(f"  {i:<3} {query[:55]:<55} NO RESULTS — FAIL")
+            failures.append(f"BM25 query {i} returned no results: '{query[:50]}'")
+
+    print(f"\n  BM25 Retrieval: {bm25_passes}/{bm25_total} PASS")
+
+    # ---------------------------------------------------------------------------
+    # STEP 4 — scorer.py end-to-end
+    # ---------------------------------------------------------------------------
+
+    section("STEP 4 — Scorer (end-to-end, one doc at a time)")
+
+    scorer_passes = 0
+    scorer_total  = 9
+
+    try:
+        from scorer import score_documents
+        print("  Import OK: scorer.score_documents")
+    except ImportError as e:
+        print(f"  IMPORT ERROR: {e}")
+        print("  FIX: ensure scripts/ is in PYTHONPATH or run from repo root")
+        sys.exit(1)
+
+    print(f"\n  {'Doc':<22} {'Ctrl':<5} {'Score':>6}  {'Expected':<14} {'Predicted':<14} {'Result'}")
+    print(f"  {'-'*22} {'-'*5} {'-'*6}  {'-'*14} {'-'*14} {'-'*6}")
+
+    for doc_name, expected in EXPECTED_LABELS.items():
+        control = CONTROL_FOR_DOC[doc_name]
+        text    = TEST_DOCS[doc_name]
+
+        result    = score_documents([text])
+        score_val = result[control]["score"]
+        predicted = score_to_label_scorer(score_val)
+        ok        = predicted == expected
+        status    = "PASS" if ok else "FAIL"
+
+        if ok:
+            scorer_passes += 1
+        else:
+            failures.append(
+                f"Scorer [{doc_name}]: expected {expected}, got {predicted} (score={score_val:.1f})"
+            )
+        print(f"  {doc_name:<22} {control:<5} {score_val:>6.1f}  {expected:<14} {predicted:<14} {status}")
+
+    print(f"\n  Scorer: {scorer_passes}/{scorer_total} PASS")
+
+    # ---------------------------------------------------------------------------
+    # STEP 5 — explain.py (OpenRouter)
+    # ---------------------------------------------------------------------------
+
+    section("STEP 5 — Explain (OpenRouter)")
+
     explain_status = "SKIP"
-    explain_detail = str(e)
-    print(f"  OpenRouter not reachable — skipping explain test.")
-    print("  Check your OPENROUTER_API_KEY in .env")
-except openai.AuthenticationError as e:
-    explain_status = "SKIP"
-    explain_detail = str(e)
-    print(f"  OpenRouter authentication failed — skipping explain test.")
-    print("  Check your OPENROUTER_API_KEY in .env")
-except RuntimeError as e:
-    explain_status = "SKIP"
-    explain_detail = str(e)
-    print(f"  {e}")
-except Exception as e:
-    # Catch API connection errors that may surface as generic exceptions
-    err_str = str(e).lower()
-    if any(kw in err_str for kw in ("connect", "refused", "api_key", "authentication", "socket", "network")):
+    explain_detail = "Not attempted"
+
+    try:
+        import openai  # noqa: F401 — check availability before importing generate_report
+        from explain import generate_report
+
+        print("  Import OK: openai, explain.generate_report")
+        print("  Running scorer on all 9 docs combined …")
+        combined_result = score_documents(all_texts)
+
+        scores_path = PROCESSED_DIR / "scores.json"
+        with open(scores_path, "w", encoding="utf-8") as fh:
+            json.dump(combined_result, fh, indent=2)
+        print(f"  Scores saved → {scores_path}")
+
+        print("  Calling generate_report() — this may take 30–90 seconds …")
+        generate_report(str(scores_path))
+
+        # Verify audit_report.json
+        report_path = PROCESSED_DIR / "audit_report.json"
+        if not report_path.exists():
+            raise FileNotFoundError(f"audit_report.json not created at {report_path}")
+
+        with open(report_path, encoding="utf-8") as fh:
+            report = json.load(fh)
+
+        all_findings_ok = True
+        for ctrl in ("PC1", "PC2", "PC3"):
+            finding = report.get("findings", {}).get(ctrl, "")
+            if not finding or len(finding) < 50:
+                all_findings_ok = False
+                failures.append(
+                    f"Explain [{ctrl}]: finding missing or too short ({len(finding)} chars)"
+                )
+
+        if all_findings_ok:
+            explain_status = "PASS"
+            explain_detail = "audit_report.json created; all findings ≥ 50 chars"
+        else:
+            explain_status = "FAIL"
+            explain_detail = "One or more findings are empty or too short"
+
+    except (openai.APIConnectionError, ConnectionError, ConnectionRefusedError, OSError) as e:
         explain_status = "SKIP"
-        explain_detail = f"OpenRouter not reachable: {e}"
+        explain_detail = str(e)
         print(f"  OpenRouter not reachable — skipping explain test.")
         print("  Check your OPENROUTER_API_KEY in .env")
-    else:
-        explain_status = "FAIL"
+    except openai.AuthenticationError as e:
+        explain_status = "SKIP"
         explain_detail = str(e)
-        failures.append(f"Explain: unexpected error — {e}")
-        print(f"  FAIL: {e}")
+        print(f"  OpenRouter authentication failed — skipping explain test.")
+        print("  Check your OPENROUTER_API_KEY in .env")
+    except RuntimeError as e:
+        explain_status = "SKIP"
+        explain_detail = str(e)
+        print(f"  {e}")
+    except Exception as e:
+        # Catch API connection errors that may surface as generic exceptions
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ("connect", "refused", "api_key", "authentication", "socket", "network")):
+            explain_status = "SKIP"
+            explain_detail = f"OpenRouter not reachable: {e}"
+            print(f"  OpenRouter not reachable — skipping explain test.")
+            print("  Check your OPENROUTER_API_KEY in .env")
+        else:
+            explain_status = "FAIL"
+            explain_detail = str(e)
+            failures.append(f"Explain: unexpected error — {e}")
+            print(f"  FAIL: {e}")
 
-print(f"\n  Explain (Ollama): {explain_status}")
+    print(f"\n  Explain (Ollama): {explain_status}")
 
-# ---------------------------------------------------------------------------
-# STEP 6 — Final report
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # STEP 6 — Final report
+    # ---------------------------------------------------------------------------
 
-section("STEP 6 — Smoke Test Summary")
+    section("STEP 6 — Smoke Test Summary")
 
-lf_ok      = lf_passes      == lf_total
-bm25_ok    = bm25_passes    == bm25_total
-scorer_ok  = scorer_passes  == scorer_total
-explain_ok = explain_status in ("PASS", "SKIP")
+    lf_ok      = lf_passes      == lf_total
+    bm25_ok    = bm25_passes    == bm25_total
+    scorer_ok  = scorer_passes  == scorer_total
+    explain_ok = explain_status in ("PASS", "SKIP")
 
-overall_pass = lf_ok and bm25_ok and scorer_ok and explain_ok
+    overall_pass = lf_ok and bm25_ok and scorer_ok and explain_ok
 
-print(f"""
-==========================================
-  NCIIPC PIPELINE SMOKE TEST RESULTS
-==========================================
-  Labeling Functions    {lf_passes}/{lf_total}   {'PASS' if lf_ok else 'FAIL'}
-  BM25 Retrieval        {bm25_passes}/{bm25_total}   {'PASS' if bm25_ok else 'FAIL'}
-  Scorer                {scorer_passes}/{scorer_total}   {'PASS' if scorer_ok else 'FAIL'}
-  Explain (Ollama)      -    {explain_status}
-==========================================
-  Overall: {'PASS' if overall_pass else 'FAIL'}
-""")
+    print(f"""
+    ==========================================
+      NCIIPC PIPELINE SMOKE TEST RESULTS
+    ==========================================
+      Labeling Functions    {lf_passes}/{lf_total}   {'PASS' if lf_ok else 'FAIL'}
+      BM25 Retrieval        {bm25_passes}/{bm25_total}   {'PASS' if bm25_ok else 'FAIL'}
+      Scorer                {scorer_passes}/{scorer_total}   {'PASS' if scorer_ok else 'FAIL'}
+      Explain (Ollama)      -    {explain_status}
+    ==========================================
+      Overall: {'PASS' if overall_pass else 'FAIL'}
+    """)
 
-if failures:
-    print("  Failures:")
-    for f in failures:
-        print(f"    - {f}")
-    print()
+    if failures:
+        print("  Failures:")
+        for f in failures:
+            print(f"    - {f}")
+        print()
 
-if overall_pass:
-    print("  Pipeline is ready for real documents.")
-else:
-    print("  Fix the failures above before running on real documents.")
+    if overall_pass:
+        print("  Pipeline is ready for real documents.")
+    else:
+        print("  Fix the failures above before running on real documents.")
 
-# ---------------------------------------------------------------------------
-# Save results JSON
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # Save results JSON
+    # ---------------------------------------------------------------------------
 
-results_payload = {
-    "timestamp":     datetime.datetime.now().isoformat(),
-    "lf_score":      f"{lf_passes}/{lf_total}",
-    "bm25_score":    f"{bm25_passes}/{bm25_total}",
-    "scorer_score":  f"{scorer_passes}/{scorer_total}",
-    "explain_status": explain_status,
-    "overall":       "PASS" if overall_pass else "FAIL",
-    "failures":      failures,
-}
+    results_payload = {
+        "timestamp":     datetime.datetime.now().isoformat(),
+        "lf_score":      f"{lf_passes}/{lf_total}",
+        "bm25_score":    f"{bm25_passes}/{bm25_total}",
+        "scorer_score":  f"{scorer_passes}/{scorer_total}",
+        "explain_status": explain_status,
+        "overall":       "PASS" if overall_pass else "FAIL",
+        "failures":      failures,
+    }
 
-results_path = PROCESSED_DIR / "smoke_test_results.json"
-with open(results_path, "w", encoding="utf-8") as fh:
-    json.dump(results_payload, fh, indent=2)
-print(f"\n  Full results saved → {results_path}")
+    results_path = PROCESSED_DIR / "smoke_test_results.json"
+    with open(results_path, "w", encoding="utf-8") as fh:
+        json.dump(results_payload, fh, indent=2)
+    print(f"\n  Full results saved → {results_path}")
+
+
+if __name__ == "__main__":
+    main()

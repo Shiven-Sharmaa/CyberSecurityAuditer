@@ -13,6 +13,8 @@ Deep-dive documentation for the NCIIPC compliance scoring pipeline: the full req
 7. [Security measures](#security-measures)
 8. [Logging](#logging)
 9. [Smoke test](#smoke-test)
+10. [Evaluation harness](#evaluation-harness)
+11. [Benchmark](#benchmark)
 
 ## Environment variables
 
@@ -300,3 +302,22 @@ Runs against 9 inline synthetic documents (3 per control × compliant/partial/no
 | Explanation generation | pass, or skipped if no API key is configured |
 
 Results are written to `data/processed/smoke_test_results.json`.
+
+## Evaluation harness
+
+```bash
+python scripts/evaluate.py          # LF-only: fast, free, deterministic
+python scripts/evaluate.py --llm    # also exercises the LLM ensemble
+```
+
+Reuses the same 9 labeled synthetic documents as the smoke test (imported from `smoke_test.TEST_DOCS`/`EXPECTED_LABELS`/`CONTROL_FOR_DOC`), but instead of a threshold pass/fail check, computes a full confusion matrix and per-label precision/recall/F1 plus overall accuracy and macro F1 — a stronger, more standard claim than "N/N pass." Results are written to `data/processed/eval_metrics.json`. See [Results](../README.md#results) in the README for the current numbers.
+
+Note: `smoke_test.py`'s executable steps are wrapped in `if __name__ == "__main__":` specifically so its data (`TEST_DOCS`, `EXPECTED_LABELS`, `CONTROL_FOR_DOC`, `score_to_label_scorer`) can be imported by `evaluate.py` and `benchmark_bm25.py` without re-running the whole smoke test suite as an import side effect.
+
+## Benchmark
+
+```bash
+python scripts/benchmark_bm25.py --scale 20
+```
+
+`nciipc-prep/src/chunker.cpp` and `bm25.cpp` are mirrored line-for-line in pure Python inside `benchmark_bm25.py` (same tokenization, same window/stride, same BM25+ formula and constants), so the timing comparison isolates the language/runtime rather than an algorithmic difference. `--scale N` repeats the 9-document synthetic corpus N times to simulate a larger multi-document batch. See [Results](../README.md#results) in the README for measured numbers at a few corpus sizes.

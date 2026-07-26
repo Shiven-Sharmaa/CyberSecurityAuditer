@@ -10,7 +10,7 @@ Built to evaluate compliance against three NCIIPC controls:
 | PC2     | Interdependency Mapping  | Vertical and horizontal mapping of dependencies between critical systems |
 | PC3     | Cybersecurity Governance | CISO reporting line, dedicated ISD, 24/7 SOC, independent audit function |
 
-Full technical write-up (pipeline internals, algorithms, file-by-file breakdown, worked example): **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+Full technical write-up (pipeline internals, algorithms, file-by-file breakdown, worked example): **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. Planned follow-on work (hybrid retrieval, LLM confidence scoring, prompt-injection defenses, and more): **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
 ## How it works
 
@@ -83,7 +83,34 @@ python app.py                    # web UI at http://localhost:5000
 python scripts/pipeline.py path/to/report.pdf   # single-document CLI
 
 python scripts/smoke_test.py     # end-to-end check against synthetic docs, no API key required
+python scripts/evaluate.py       # precision/recall/F1 against the same labeled docs (see Results below)
+python scripts/benchmark_bm25.py # C++ vs. pure-Python timing comparison (see Results below)
+
+python scripts/generate_report_docx.py  # regenerates NCIIPC_Project_Report.docx, the project write-up
 ```
+
+## Results
+
+All numbers below are reproducible — run the commands yourself. There is no held-out set beyond the 9 labeled synthetic documents used by `smoke_test.py`/`evaluate.py`, so treat this as a regression check, not a large-scale accuracy claim.
+
+**Scoring accuracy** (`python scripts/evaluate.py`, LF-only mode — deterministic, no API calls) against the 9 labeled synthetic documents (3 per control × compliant/partial/non-compliant):
+
+| Label | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| COMPLIANT | 1.00 | 1.00 | 1.00 | 3 |
+| PARTIAL | 1.00 | 1.00 | 1.00 | 3 |
+| NON_COMPLIANT | 1.00 | 1.00 | 1.00 | 3 |
+
+Accuracy: 100% · Macro F1: 1.00 · N = 9
+
+**C++ vs. pure-Python retrieval** (`python scripts/benchmark_bm25.py`) — a line-for-line pure-Python port of the same chunking + BM25+ algorithm, timed against the compiled `nciipc_cpp` extension:
+
+| Corpus size | Chunk + index speedup | BM25 query speedup | Overall speedup |
+|---|---|---|---|
+| 1,800 chunks | 1.6x | 16.1x | 1.8x |
+| 7,200 chunks | 1.4x | 23.5x | 1.7x |
+
+The query speedup grows with corpus size and is the more important number in practice: retrieval (`query_bm25`) runs once per field per request (16 times per document scored), while indexing runs once per request — so C++ pays off most exactly where the pipeline calls it most.
 
 ## Environment variables
 
@@ -101,7 +128,10 @@ scripts/
   scorer.py                  BM25 retrieval + LLM voting + score aggregation
   explain.py                 LLM voting calls + audit finding generation
   labeling_functions.py      Regex-based compliance signal detectors (fallback)
-  smoke_test.py               End-to-end validation with synthetic documents
+  smoke_test.py              End-to-end validation with synthetic documents
+  evaluate.py                Precision/recall/F1 against the labeled synthetic docs
+  benchmark_bm25.py          C++ vs. pure-Python timing comparison
+  generate_report_docx.py    Regenerates the project write-up (NCIIPC_Project_Report.docx)
 
 nciipc-prep/                 C++ performance module (chunking + BM25+)
   CMakeLists.txt

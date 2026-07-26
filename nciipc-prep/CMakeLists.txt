@@ -4,7 +4,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 # Auto-detect pybind11's CMake config from the active Python environment
 # (activate your venv before running cmake so this picks up the right pybind11)
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
 execute_process(
   COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
   OUTPUT_VARIABLE pybind11_DIR
