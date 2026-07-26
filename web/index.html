@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NCIIPC Compliance Scorer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #f0f4f8;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 40px 16px 64px;
+      color: #1a2332;
+    }
+
+    /* ── Header ── */
+    .page-header {
+      width: 100%;
+      max-width: 700px;
+      margin-bottom: 32px;
+    }
+    .badge {
+      display: inline-block;
+      background: #e8f0fe;
+      color: #1a56db;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border-radius: 20px;
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 28px;
+      font-weight: 700;
+      color: #0f1f38;
+      letter-spacing: -.3px;
+      line-height: 1.2;
+    }
+    p.subtitle {
+      color: #5a6a7e;
+      margin-top: 6px;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+
+    /* ── Main card ── */
+    .main-card {
+      width: 100%;
+      max-width: 700px;
+      background: #ffffff;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,.08), 0 1px 4px rgba(0,0,0,.04);
+      padding: 32px;
+    }
+
+    /* ── Form sections ── */
+    .section { margin: 0 0 20px; }
+    label {
+      display: block;
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: .03em;
+      color: #374151;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+    }
+
+    input[type="file"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 2px dashed #d1d9e6;
+      border-radius: 10px;
+      font-size: 14px;
+      color: #4b5563;
+      background: #f8fafc;
+      cursor: pointer;
+      transition: border-color .2s, background .2s;
+    }
+    input[type="file"]:hover {
+      border-color: #1a56db;
+      background: #f0f4ff;
+    }
+
+    input[type="url"] {
+      width: 100%;
+      padding: 11px 14px;
+      border: 1.5px solid #d1d9e6;
+      border-radius: 10px;
+      font-size: 15px;
+      color: #1a2332;
+      background: #f8fafc;
+      transition: border-color .2s, box-shadow .2s;
+      outline: none;
+    }
+    input[type="url"]:focus {
+      border-color: #1a56db;
+      box-shadow: 0 0 0 3px rgba(26,86,219,.12);
+      background: #fff;
+    }
+    input[type="url"]::placeholder { color: #9ca3af; }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #9ca3af;
+      font-size: 13px;
+      font-weight: 500;
+      margin: 8px 0 20px;
+    }
+    .divider::before,
+    .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: #e5e7eb;
+    }
+
+    button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: linear-gradient(135deg, #1a56db 0%, #1e40af 100%);
+      color: #fff;
+      border: none;
+      padding: 13px 32px;
+      font-size: 15px;
+      font-weight: 600;
+      border-radius: 10px;
+      cursor: pointer;
+      width: 100%;
+      letter-spacing: .02em;
+      box-shadow: 0 2px 8px rgba(26,86,219,.3);
+      transition: opacity .2s, box-shadow .2s, transform .1s;
+    }
+    button:hover:not(:disabled) {
+      opacity: .93;
+      box-shadow: 0 4px 16px rgba(26,86,219,.35);
+      transform: translateY(-1px);
+    }
+    button:active:not(:disabled) { transform: translateY(0); }
+    button:disabled {
+      background: #cbd5e1;
+      box-shadow: none;
+      cursor: default;
+    }
+
+    /* ── Status / error ── */
+    #status {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+      color: #4b5563;
+      font-size: 14px;
+    }
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2.5px solid #d1d9e6;
+      border-top-color: #1a56db;
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #error {
+      margin-top: 14px;
+      padding: 12px 16px;
+      background: #fff1f2;
+      border: 1px solid #fecdd3;
+      border-radius: 8px;
+      color: #be123c;
+      font-size: 14px;
+      display: none;
+    }
+    #error:not(:empty) { display: block; }
+
+    /* ── Results ── */
+    #results {
+      display: none;
+      margin-top: 32px;
+      width: 100%;
+      max-width: 700px;
+    }
+
+    .results-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .results-header h2 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #0f1f38;
+    }
+
+    /* Overall score hero */
+    .score-hero {
+      background: linear-gradient(135deg, #0f1f38 0%, #1a3a6b 100%);
+      border-radius: 14px;
+      padding: 28px 32px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      color: #fff;
+    }
+    .score-ring {
+      flex-shrink: 0;
+      width: 76px;
+      height: 76px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.1);
+      border: 3px solid rgba(255,255,255,.25);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    .score-ring .overall {
+      font-size: 24px;
+      font-weight: 800;
+      color: #fff;
+      line-height: 1;
+    }
+    .score-ring .score-denom {
+      font-size: 11px;
+      color: rgba(255,255,255,.6);
+      margin-top: 2px;
+    }
+    .score-hero-text h3 {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .score-hero-text p {
+      font-size: 13px;
+      color: rgba(255,255,255,.65);
+    }
+
+    /* Control cards */
+    .card {
+      background: #ffffff;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.06), 0 1px 3px rgba(0,0,0,.04);
+      padding: 20px 24px;
+      margin: 12px 0;
+      border-left: 4px solid #1a56db;
+      transition: box-shadow .2s;
+    }
+    .card:hover { box-shadow: 0 4px 20px rgba(0,0,0,.1); }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .card h3 {
+      font-size: 16px;
+      font-weight: 700;
+      color: #0f1f38;
+    }
+    .card-meta {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .score-badge {
+      background: #e8f0fe;
+      color: #1a56db;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 20px;
+    }
+    .maturity-badge {
+      background: #f0fdf4;
+      color: #15803d;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 20px;
+    }
+    .card .finding { color: #4b5563; font-size: 14px; line-height: 1.65; }
+    .card .no-finding { color: #9ca3af; font-size: 14px; font-style: italic; }
+
+    /* ── Per-doc table ── */
+    #perDoc { margin-top: 24px; display: none; }
+    #perDoc h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #0f1f38;
+      margin-bottom: 12px;
+    }
+    .doc-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: #fff;
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 2px 10px rgba(0,0,0,.06);
+    }
+    .doc-table th {
+      background: #f1f5f9;
+      color: #374151;
+      font-weight: 700;
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .doc-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid #f3f4f6;
+      color: #374151;
+    }
+    .doc-table tr:last-child td { border-bottom: none; }
+    .doc-table tr:hover td { background: #f8fafc; }
+    .doc-table .fname {
+      max-width: 200px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+      color: #0f1f38;
+    }
+    .doc-table .num { font-weight: 700; color: #1a56db; }
+    .doc-table .mat { font-size: 11px; color: #6b7280; }
+  </style>
+</head>
+<body>
+
+  <div class="page-header">
+    <div class="badge">NCIIPC Framework</div>
+    <h1>Compliance Scorer</h1>
+    <p class="subtitle">Upload a company PDF or paste a website URL to score NCIIPC compliance.</p>
+  </div>
+
+  <div class="main-card">
+    <div class="section">
+      <label for="pdfInput">Upload documents (PDF, DOCX, TXT — one or more)</label>
+      <input type="file" id="pdfInput" accept=".pdf,.docx,.txt,.text" multiple>
+      <div id="fileList" style="margin-top:8px;font-size:13px;color:#6b7280;"></div>
+    </div>
+
+    <div class="divider">or</div>
+
+    <div class="section">
+      <label for="urlInput">Website URL</label>
+      <input type="url" id="urlInput" placeholder="https://company.com/annual-report">
+    </div>
+
+    <button id="btn" onclick="analyse()">Analyse</button>
+
+    <div id="status">
+      <div class="spinner"></div>
+      Running analysis — this may take 1-2 minutes…
+    </div>
+    <div id="error"></div>
+  </div>
+
+  <div id="results">
+    <div class="results-header">
+      <h2>Compliance Results</h2>
+    </div>
+    <div class="score-hero">
+      <div class="score-ring">
+        <span class="overall" id="companyScore"></span>
+        <span class="score-denom">/ 100</span>
+      </div>
+      <div class="score-hero-text">
+        <h3>Overall Compliance Score</h3>
+        <p>Based on NCIIPC Critical Information Infrastructure guidelines</p>
+      </div>
+    </div>
+    <div id="cards"></div>
+
+    <div id="perDoc">
+      <h3>Per-Document Breakdown</h3>
+      <table class="doc-table">
+        <thead>
+          <tr>
+            <th>Document</th>
+            <th>Overall</th>
+            <th>PC1</th>
+            <th>PC2</th>
+            <th>PC3</th>
+          </tr>
+        </thead>
+        <tbody id="docRows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    // Show selected filenames whenever the user picks files
+    document.getElementById("pdfInput").addEventListener("change", function () {
+      const files = Array.from(this.files);
+      const list  = document.getElementById("fileList");
+      if (files.length === 0) { list.textContent = ""; return; }
+      list.textContent = files.length === 1
+        ? files[0].name
+        : `${files.length} files: ${files.map(f => f.name).join(", ")}`;
+    });
+
+    async function analyse() {
+      const files   = Array.from(document.getElementById("pdfInput").files);
+      const url     = document.getElementById("urlInput").value.trim();
+      const btn     = document.getElementById("btn");
+      const status  = document.getElementById("status");
+      const errorEl = document.getElementById("error");
+      const results = document.getElementById("results");
+
+      errorEl.textContent = "";
+      results.style.display = "none";
+
+      if (files.length === 0 && !url) {
+        errorEl.textContent = "Please upload one or more PDFs or enter a URL first.";
+        return;
+      }
+
+      btn.disabled         = true;
+      status.style.display = "flex";
+
+      // Update status text to show file count
+      const statusText = status.querySelector("span") || status.lastChild;
+      if (files.length > 1) {
+        status.lastChild.textContent = ` Analysing ${files.length} documents — this may take a few minutes…`;
+      }
+
+      try {
+        let response;
+
+        if (files.length > 0) {
+          const form = new FormData();
+          files.forEach(f => form.append("file", f));
+          response = await fetch("/score", { method: "POST", body: form });
+        } else {
+          response = await fetch("/score", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url })
+          });
+        }
+
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Server returned an error.");
+
+        // Overall score
+        document.getElementById("companyScore").textContent = data.company_score.toFixed(1);
+
+        // Sources line (shown under the hero)
+        const hero = document.querySelector(".score-hero-text p");
+        if (data.sources && data.sources.length) {
+          hero.textContent = "Sources: " + data.sources.join(" · ");
+        }
+
+        // Control cards
+        const cards  = document.getElementById("cards");
+        cards.innerHTML = "";
+        const labels = { PC1: "CII Identification", PC2: "Interdependency Mapping", PC3: "Cybersecurity Governance" };
+
+        for (const ctrl of ["PC1", "PC2", "PC3"]) {
+          const c = data[ctrl];
+          const finding = c.finding
+            ? `<p class="finding">${c.finding}</p>`
+            : `<p class="no-finding">No LLM finding available (check OPENROUTER_API_KEY).</p>`;
+
+          cards.innerHTML += `
+            <div class="card">
+              <div class="card-header">
+                <h3>${ctrl} — ${labels[ctrl]}</h3>
+                <div class="card-meta">
+                  <span class="score-badge">${c.score.toFixed(1)} / 100</span>
+                  <span class="maturity-badge">${c.maturity}</span>
+                </div>
+              </div>
+              ${finding}
+            </div>`;
+        }
+
+        // Per-doc breakdown (only when 2+ docs)
+        const perDoc  = document.getElementById("perDoc");
+        const docRows = document.getElementById("docRows");
+        if (data.per_doc && data.per_doc.length > 1) {
+          const ctrlCell = (c) => c.has_evidence
+            ? `<span class="num">${c.score.toFixed(1)}</span><br><span class="mat">${c.maturity}</span>`
+            : `<span style="color:#9ca3af">—</span>`;
+          docRows.innerHTML = data.per_doc.map(d => `
+            <tr>
+              <td class="fname" title="${d.source}">${d.source}</td>
+              <td><span class="num">${d.company_score.toFixed(1)}</span></td>
+              <td>${ctrlCell(d.PC1)}</td>
+              <td>${ctrlCell(d.PC2)}</td>
+              <td>${ctrlCell(d.PC3)}</td>
+            </tr>`).join("");
+          perDoc.style.display = "block";
+        } else {
+          perDoc.style.display = "none";
+        }
+
+        results.style.display = "block";
+
+      } catch (err) {
+        errorEl.textContent = "Error: " + err.message;
+      } finally {
+        btn.disabled         = false;
+        status.style.display = "none";
+        status.lastChild.textContent = " Running analysis — this may take 1-2 minutes…";
+      }
+    }
+  </script>
+
+</body>
+</html>

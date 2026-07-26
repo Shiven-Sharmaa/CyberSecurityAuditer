@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# C++ build artifacts
+nciipc-prep/build/
+
+# Data & logs (may contain sensitive documents / PII)
+data/raw/
+data/processed/
+data/synthetic/
+data/holdout/
+logs/
+
+# Archive (large files)
+archive/
+
+# OS
+.DS_Store
+Thumbs.db
