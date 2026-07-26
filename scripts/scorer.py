@@ -16,6 +16,7 @@ from labeling_functions import (
     score_chunk,
 )
 from explain import vote_chunk
+import embeddings
 
 # ---------------------------------------------------------------------------
 # Query definitions
@@ -46,7 +47,40 @@ FIELD_TO_LFS: dict[str, list] = {
 }
 
 TOP_K = 5
+CANDIDATE_K = 15           # BM25 shortlist width before the embedding rerank
 MIN_BM25_SCORE = 1.0
+HYBRID_ALPHA = 0.6         # weight on (normalized) BM25 score vs. embedding similarity
+CONFIDENCE_THRESHOLD = 0.5  # LLM-ensemble agreement below this is flagged for review
+
+
+def _hybrid_rerank(query: str, candidates: list[tuple[int, float]],
+                    get_text) -> list[tuple[int, float]]:
+    """
+    Re-rank a BM25 shortlist by blending normalized BM25 score with embedding
+    cosine similarity to the query. Falls back to the original BM25 order,
+    unchanged, if the embeddings module is unavailable (see embeddings.py).
+    """
+    if len(candidates) <= 1:
+        return candidates
+
+    texts = [get_text(cid) for cid, _ in candidates]
+    embedded = embeddings.embed(texts + [query])
+    if embedded is None:
+        return candidates
+
+    *chunk_embs, query_emb = embedded
+    bm25_scores = [s for _, s in candidates]
+    lo, hi = min(bm25_scores), max(bm25_scores)
+    span = (hi - lo) or 1.0
+
+    blended = []
+    for (cid, bm25_s), emb in zip(candidates, chunk_embs):
+        norm_bm25 = (bm25_s - lo) / span
+        sim = embeddings.cosine_similarity(emb, query_emb)
+        blended.append((cid, HYBRID_ALPHA * norm_bm25 + (1 - HYBRID_ALPHA) * sim))
+
+    blended.sort(key=lambda x: x[1], reverse=True)
+    return blended
 
 
 # ---------------------------------------------------------------------------
@@ -89,25 +123,32 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
         prefix = field.split("_")[0]          # "PC1", "PC2", or "PC3"
         lfs = FIELD_TO_LFS[prefix]
 
-        # BM25 retrieval — filter out low-confidence matches
-        raw = nciipc_cpp.query_bm25(query, TOP_K)
-        results = [(cid, s) for cid, s in raw if s >= MIN_BM25_SCORE]
+        # BM25 retrieval on a wider shortlist, then rerank by BM25 + embedding
+        # similarity blended together (see _hybrid_rerank / HYBRID_ALPHA above)
+        raw = nciipc_cpp.query_bm25(query, CANDIDATE_K)
+        candidates = [(cid, s) for cid, s in raw if s >= MIN_BM25_SCORE]
+        results = _hybrid_rerank(query, candidates, nciipc_cpp.get_chunk_text)[:TOP_K]
         texts   = [nciipc_cpp.get_chunk_text(cid) for cid, _ in results]
 
         if not texts:
             # No evidence found — absence = non-compliant
             print(f"  [{field}] No qualifying chunks — non-compliant (0.0).")
-            field_results[field] = {"score": 0.0, "best_chunk": ""}
+            field_results[field] = {"score": 0.0, "best_chunk": "",
+                                     "confidence": None, "needs_review": False}
             continue
 
         # Score each retrieved chunk: try LLM voting, fall back to LFs
         chunk_scores = []
+        confidences  = []
         llm_chunks = 0
         lf_chunks  = 0
         for text in texts:
-            llm_votes = vote_chunk(field, text) if use_llm else []
+            llm_result = vote_chunk(field, text) if use_llm else None
+            llm_votes = llm_result["votes"] if llm_result else []
             if llm_votes:
                 chunk_scores.append(mean(llm_votes))
+                if llm_result["confidence"] is not None:
+                    confidences.append(llm_result["confidence"])
                 llm_chunks += 1
             else:
                 chunk_scores.append(score_chunk(text, lfs))
@@ -118,6 +159,8 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
         field_score = mean(chunk_scores) * 100.0          # 0-100 scale
         total_chunks = llm_chunks + lf_chunks
         llm_coverage = round(llm_chunks / total_chunks, 2) if total_chunks else 0.0
+        field_confidence = round(mean(confidences), 2) if confidences else None
+        needs_review = field_confidence is not None and field_confidence < CONFIDENCE_THRESHOLD
 
         # Best chunk = highest score
         best_idx   = chunk_scores.index(max(chunk_scores))
@@ -127,8 +170,11 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
             "score": round(field_score, 2),
             "best_chunk": best_chunk,
             "llm_coverage": llm_coverage,
+            "confidence": field_confidence,
+            "needs_review": needs_review,
         }
-        print(f"  [{field}] score={field_score:.1f}/100  best_chunk_len={len(best_chunk)}")
+        print(f"  [{field}] score={field_score:.1f}/100  best_chunk_len={len(best_chunk)}"
+              f"  confidence={field_confidence}")
 
     # 3. Aggregate per control — all fields now have numeric scores (0.0 if no evidence)
     def control_score(prefix: str) -> float:
@@ -139,6 +185,14 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
     def control_has_evidence(prefix: str) -> bool:
         return any(v["best_chunk"] != ""
                    for k, v in field_results.items() if k.startswith(prefix))
+
+    def control_confidence(prefix: str) -> float | None:
+        confs = [v["confidence"] for k, v in field_results.items()
+                 if k.startswith(prefix) and v["confidence"] is not None]
+        return round(mean(confs), 2) if confs else None
+
+    def control_needs_review(prefix: str) -> bool:
+        return any(v["needs_review"] for k, v in field_results.items() if k.startswith(prefix))
 
     pc1_score = control_score("PC1")
     pc2_score = control_score("PC2")
@@ -159,18 +213,24 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
             "score":        pc1_score,
             "maturity":     maturity(pc1_score),
             "has_evidence": control_has_evidence("PC1"),
+            "confidence":   control_confidence("PC1"),
+            "needs_review": control_needs_review("PC1"),
             "fields":       control_fields("PC1"),
         },
         "PC2": {
             "score":        pc2_score,
             "maturity":     maturity(pc2_score),
             "has_evidence": control_has_evidence("PC2"),
+            "confidence":   control_confidence("PC2"),
+            "needs_review": control_needs_review("PC2"),
             "fields":       control_fields("PC2"),
         },
         "PC3": {
             "score":        pc3_score,
             "maturity":     maturity(pc3_score),
             "has_evidence": control_has_evidence("PC3"),
+            "confidence":   control_confidence("PC3"),
+            "needs_review": control_needs_review("PC3"),
             "fields":       control_fields("PC3"),
         },
     }

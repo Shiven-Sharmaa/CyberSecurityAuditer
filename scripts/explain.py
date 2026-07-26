@@ -11,6 +11,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
+import llm_cache
+
 _MAX_RETRIES = 4
 _BACKOFF_BASE = 1.0  # seconds; doubles each retry: 1, 2, 4, 8
 
@@ -125,11 +127,22 @@ def _parse_vote(answer: str) -> float:
     return 0.0
 
 
-def vote_chunk(field: str, chunk_text: str) -> list[float]:
+def vote_chunk(field: str, chunk_text: str) -> dict:
     """
     Send a chunk to all voting models for a given field.
-    Returns a list of vote values (0.0, 0.5, 1.0) — one per model that succeeded.
-    Empty list means all models failed (caller should fall back to LFs).
+
+    Returns {"votes": [...], "confidence": float | None}:
+      - "votes" is a list of vote values (0.0, 0.5, 1.0) — one per model that
+        succeeded (0 to len(models) elements). An empty list means all models
+        failed (caller should fall back to LFs).
+      - "confidence" is None when fewer than 2 votes were collected (not
+        enough to measure agreement). Otherwise it's
+        1 - (max(votes) - min(votes)): 1.0 means every model agreed, 0.0 means
+        the models split between opposite ends (e.g. COMPLIANT vs NON_COMPLIANT).
+
+    Each (model, field, chunk_text) vote is cached (see llm_cache.py) since
+    voting runs at temperature=0.0 and is therefore deterministic — a cache
+    hit skips the API call entirely.
     """
     description = FIELD_DESCRIPTIONS.get(field, field)
     models = _get_voting_models()
@@ -157,6 +170,11 @@ Respond with ONLY one word: COMPLIANT, PARTIAL, or NON_COMPLIANT"""
     votes: list[float] = []
 
     for model in models:
+        cached_vote = llm_cache.get(model, field, chunk_text)
+        if cached_vote is not None:
+            votes.append(cached_vote)
+            continue
+
         succeeded = False
         for attempt in range(_MAX_RETRIES):
             t0 = time.perf_counter()
@@ -172,6 +190,7 @@ Respond with ONLY one word: COMPLIANT, PARTIAL, or NON_COMPLIANT"""
                 answer = response.choices[0].message.content.strip()
                 vote = _parse_vote(answer)
                 votes.append(vote)
+                llm_cache.set(model, field, chunk_text, vote)
 
                 usage = response.usage.model_dump() if response.usage else None
                 _log_call(field, model, prompt, answer, usage, elapsed_ms)
@@ -189,7 +208,8 @@ Respond with ONLY one word: COMPLIANT, PARTIAL, or NON_COMPLIANT"""
         if not succeeded:
             print(f"  [{field}] All {_MAX_RETRIES} retries failed for {model}.")
 
-    return votes
+    confidence = round(1.0 - (max(votes) - min(votes)), 2) if len(votes) >= 2 else None
+    return {"votes": votes, "confidence": confidence}
 
 
 # ---------------------------------------------------------------------------

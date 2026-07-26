@@ -27,10 +27,13 @@ Upload (PDF/DOCX/TXT/URL)
   BM25+ inverted index + retrieval  (C++, custom implementation)
         │
         ▼
+  Hybrid rerank  (BM25 score blended with local embedding similarity)
+        │
+        ▼
   Per-chunk compliance voting  (LLM ensemble via OpenRouter, regex fallback)
         │
         ▼
-  Score aggregation → per-control scores → maturity level (L1–L5)
+  Score aggregation → per-control scores + confidence → maturity level (L1–L5)
         │
         ▼
   LLM-generated audit findings + JSON response → web UI
@@ -40,7 +43,7 @@ The retrieval and chunking layer is implemented in C++ (exposed to Python via py
 
 ## Tech stack
 
-Python 3.10+ · Flask · C++17 (pybind11) · OpenRouter (LLM ensemble voting, with a local Ollama fallback) · pdfplumber / python-docx / trafilatura for extraction
+Python 3.10+ · Flask · C++17 (pybind11) · OpenRouter (LLM ensemble voting, with a local Ollama fallback) · fastembed (local ONNX embeddings for hybrid retrieval) · pdfplumber / python-docx / trafilatura for extraction
 
 ## Getting started
 
@@ -128,6 +131,8 @@ scripts/
   scorer.py                  BM25 retrieval + LLM voting + score aggregation
   explain.py                 LLM voting calls + audit finding generation
   labeling_functions.py      Regex-based compliance signal detectors (fallback)
+  embeddings.py              Local embeddings (fastembed/ONNX) for hybrid retrieval
+  llm_cache.py               sqlite cache for deterministic LLM votes
   smoke_test.py              End-to-end validation with synthetic documents
   evaluate.py                Precision/recall/F1 against the labeled synthetic docs
   benchmark_bm25.py          C++ vs. pure-Python timing comparison
@@ -148,4 +153,7 @@ web/
 
 - **Hybrid scoring**: every chunk is voted on by 3 LLM models; if all of them fail (rate limits, network errors), the pipeline falls back to a set of Snorkel-style regex labeling functions so the tool degrades gracefully instead of failing outright.
 - **BM25+ from scratch**: the retrieval index (inverted index, IDF, BM25+ scoring with the `delta` lower-bound term) is a from-scratch C++ implementation rather than a library, since it's the hot path and needed to be fast enough to rebuild per-request.
+- **Hybrid BM25 + embedding retrieval**: each field's BM25 shortlist (top 15) is reranked by blending normalized BM25 score with embedding cosine similarity (`scorer._hybrid_rerank`) before taking the final top 5 — catches evidence that's topically relevant but doesn't share exact keywords with the query. Uses `fastembed` (ONNX runtime) rather than torch/sentence-transformers to keep the dependency footprint small; falls back to BM25-only ranking if embeddings aren't available.
+- **LLM ensemble confidence, not just an average**: `vote_chunk()` reports agreement across the 3 models (`1 - (max(votes) - min(votes))`) alongside the vote itself. Fields where the models disagree are flagged `needs_review` in the API response and the web UI, instead of silently averaging away a disagreement between "clearly compliant" and "clearly non-compliant."
+- **LLM vote caching**: voting runs at `temperature=0.0`, so a given (model, field, chunk) vote is deterministic — `llm_cache.py` caches it in sqlite so re-scoring the same document doesn't re-spend API calls or wall-clock time.
 - **Absence of evidence is evidence of non-compliance**: fields with no matching chunks above the BM25 threshold score 0 rather than being skipped, which is the correct behavior for a compliance auditor.

@@ -295,6 +295,14 @@
       padding: 3px 10px;
       border-radius: 20px;
     }
+    .review-badge {
+      background: #fef3c7;
+      color: #92400e;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 20px;
+    }
     .card .finding { color: #4b5563; font-size: 14px; line-height: 1.65; }
     .card .no-finding { color: #9ca3af; font-size: 14px; font-style: italic; }
 
@@ -479,6 +487,9 @@
           const finding = c.finding
             ? `<p class="finding">${c.finding}</p>`
             : `<p class="no-finding">No LLM finding available (check OPENROUTER_API_KEY).</p>`;
+          const reviewBadge = c.needs_review
+            ? `<span class="review-badge" title="LLM voters disagreed on one or more fields">⚠ Needs review</span>`
+            : "";
 
           cards.innerHTML += `
             <div class="card">
@@ -487,6 +498,7 @@
                 <div class="card-meta">
                   <span class="score-badge">${c.score.toFixed(1)} / 100</span>
                   <span class="maturity-badge">${c.maturity}</span>
+                  ${reviewBadge}
                 </div>
               </div>
               ${finding}

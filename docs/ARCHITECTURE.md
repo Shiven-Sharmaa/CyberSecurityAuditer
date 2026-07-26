@@ -113,13 +113,14 @@ The `analyse()` function in `index.html` reads the selected files, builds a `For
    - Chunks from all documents are concatenated into one global vector, e.g. 12 chunks from doc 0, 7 from doc 1, 3 from doc 2 → 22 chunks total.
 2. `build_index()` (bm25.cpp) builds an inverted index over all chunks: tokenizes each chunk, records its length, computes raw term frequencies, and appends `(chunk_id, freq)` postings per term. Also computes `avg_dl` across all chunks.
 3. For each of the 16 `FIELD_QUERIES` (e.g. `PC1_register`):
-   - **BM25 retrieval**: `query_bm25(query, 5)` tokenizes the query, computes IDF per term, and for every chunk containing at least one query term computes the BM25+ contribution (see [formula](#bm25-scoring-formula) below). Results are partially sorted for the top 5.
+   - **BM25 retrieval**: `query_bm25(query, CANDIDATE_K=15)` tokenizes the query, computes IDF per term, and for every chunk containing at least one query term computes the BM25+ contribution (see [formula](#bm25-scoring-formula) below). Results are partially sorted for the top 15 — wider than the final top 5, to give the rerank step below something to work with.
    - **Threshold filter**: chunks scoring below `MIN_BM25_SCORE = 1.0` are discarded as low-confidence.
+   - **Hybrid rerank**: `_hybrid_rerank()` blends each surviving candidate's normalized BM25 score with its embedding cosine similarity to the query (`HYBRID_ALPHA = 0.6` on BM25, `0.4` on similarity; see [formula](#hybrid-retrieval-rerank)), then keeps the top 5. Falls back to the original BM25 order unchanged if `embeddings.embed()` returns `None` (fastembed unavailable).
    - **No qualifying chunks** → the field scores 0.0. This encodes "absence of evidence is evidence of non-compliance."
-   - **LLM voting**: each qualifying chunk goes to `vote_chunk(field, chunk_text)`, which prompts 3 models (temperature 0.0, `max_tokens=10`) to answer COMPLIANT / PARTIAL / NON_COMPLIANT, with up to 4 retries (exponential backoff) per model. Votes are logged to `logs/llm_calls/`.
-   - **LF fallback**: if all 3 models fail, `score_chunk(text, LFS_PCn)` runs the relevant regex labeling functions and averages the non-abstaining votes instead.
-   - `field_score = mean(chunk_scores) * 100`; the highest-scoring chunk is kept as `best_chunk` for evidence display.
-4. **Aggregation**: `control_score` = mean of that control's field scores; `company_score` = weighted mean `(PC1*1.00 + PC2*0.90 + PC3*0.95) / 2.85`; each control score maps to a maturity label via [`maturity()`](#score-aggregation-and-maturity-mapping).
+   - **LLM voting**: each qualifying chunk goes to `vote_chunk(field, chunk_text)`, which prompts 3 models (temperature 0.0, `max_tokens=10`) to answer COMPLIANT / PARTIAL / NON_COMPLIANT, with up to 4 retries (exponential backoff) per model, and returns `{"votes": [...], "confidence": ...}`. Each (model, field, chunk) vote is cached in sqlite (`llm_cache.py`) first, since voting is deterministic at `temperature=0.0` — a cache hit skips the API call. Votes are logged to `logs/llm_calls/`.
+   - **LF fallback**: if all 3 models fail (empty `votes`), `score_chunk(text, LFS_PCn)` runs the relevant regex labeling functions and averages the non-abstaining votes instead.
+   - `field_score = mean(chunk_scores) * 100`; the highest-scoring chunk is kept as `best_chunk` for evidence display. `field_confidence` is the mean of each scored chunk's confidence (only chunks that got LLM votes contribute; `None` if none did), and `needs_review` is `True` when that confidence is below `CONFIDENCE_THRESHOLD = 0.5`.
+4. **Aggregation**: `control_score` = mean of that control's field scores; `company_score` = weighted mean `(PC1*1.00 + PC2*0.90 + PC3*0.95) / 2.85`; each control score maps to a maturity label via [`maturity()`](#score-aggregation-and-maturity-mapping). Control-level `confidence` and `needs_review` are likewise aggregated from that control's fields.
 
 ### Phase 4 — LLM explanations
 
@@ -155,11 +156,19 @@ HTTP entry point. Serves the web UI at `/` (static files from `web/`) and handle
 
 ### `scripts/scorer.py` — retrieval + scoring engine
 
-`FIELD_QUERIES` — 16 BM25 query strings, 5 for PC1, 4 for PC2, 6 unique for PC3 (`PC1_register/criteria/review/weakness/strength`, `PC2_vertical/horizontal/weakness/strength`, `PC3_ciso/isd/soc/audit/functions/weakness`). `FIELD_TO_LFS` maps each control prefix to its labeling-function list for the LLM fallback path. `maturity(score)` maps a 0–100 score to `L1`–`L5`. `score_documents(doc_texts, use_llm=True)` is the central function described in [Phase 3](#phase-3--combined-scoring) above; each field result also reports `llm_coverage` — the fraction of its chunks scored by LLM voting versus regex fallback.
+`FIELD_QUERIES` — 16 BM25 query strings, 5 for PC1, 4 for PC2, 6 unique for PC3 (`PC1_register/criteria/review/weakness/strength`, `PC2_vertical/horizontal/weakness/strength`, `PC3_ciso/isd/soc/audit/functions/weakness`). `FIELD_TO_LFS` maps each control prefix to its labeling-function list for the LLM fallback path. `maturity(score)` maps a 0–100 score to `L1`–`L5`. `_hybrid_rerank(query, candidates, get_text)` blends BM25 and embedding similarity (see [Phase 3](#phase-3--combined-scoring)). `score_documents(doc_texts, use_llm=True)` is the central function described in [Phase 3](#phase-3--combined-scoring) above; each field result also reports `llm_coverage` (fraction of chunks scored by LLM voting versus regex fallback), `confidence` (mean LLM-ensemble agreement, or `None`), and `needs_review` (confidence below threshold).
 
 ### `scripts/explain.py` — LLM voting + finding generation
 
-`vote_chunk(field, chunk_text)` and `explain_control(control, score, maturity, fields)` (see [Phase 3](#phase-3--combined-scoring) and [Phase 4](#phase-4--llm-explanations)). Both use an OpenRouter client (OpenAI-compatible, `base_url=https://openrouter.ai/api/v1`) with 4-attempt exponential backoff with jitter, and log every call (success or failure) to `logs/llm_calls/YYYY-MM-DD.jsonl` / `.errors.jsonl`. `generate_report(scores_path)` batch-generates findings from a previously saved `scores.json`.
+`vote_chunk(field, chunk_text)` and `explain_control(control, score, maturity, fields)` (see [Phase 3](#phase-3--combined-scoring) and [Phase 4](#phase-4--llm-explanations)). Both use an OpenRouter client (OpenAI-compatible, `base_url=https://openrouter.ai/api/v1`) with 4-attempt exponential backoff with jitter, and log every call (success or failure) to `logs/llm_calls/YYYY-MM-DD.jsonl` / `.errors.jsonl`. `vote_chunk` checks `llm_cache` before calling each model and returns `{"votes": [...], "confidence": ...}` rather than a bare list (see [LLM ensemble voting](#llm-ensemble-voting)). `generate_report(scores_path)` batch-generates findings from a previously saved `scores.json`.
+
+### `scripts/embeddings.py` — local embeddings for hybrid retrieval
+
+Thin wrapper around `fastembed.TextEmbedding` (`BAAI/bge-small-en-v1.5`, 384-dim, ONNX runtime — no PyTorch). `embed(texts)` returns one vector per text, or `None` if fastembed isn't installed or the model fails to load, so callers can fall back gracefully. `cosine_similarity(a, b)` is a plain numpy dot-product/norm helper.
+
+### `scripts/llm_cache.py` — sqlite cache for LLM votes
+
+Keyed by `sha256(model + field + chunk_text)`, stored at `data/processed/llm_vote_cache.sqlite`. Only successful votes are cached — a transient model failure is never cached, so it doesn't block a later retry once the model recovers. `get()`/`set()` open a short-lived connection per call rather than holding one open, which is simple and safe under Flask's single-threaded (`threaded=False`) serving model.
 
 ### `scripts/labeling_functions.py` — regex fallback detectors
 
@@ -208,9 +217,29 @@ idf(t) = ln( (N - df(t) + 0.5) / (df(t) + 0.5) + 1.0 )
 
 Parameters: `k1 = 1.5` (term-frequency saturation), `b = 0.75` (length normalization), `delta = 1.0` (BM25+'s lower-bound boost, ensuring a document containing a query term never scores exactly 0 for it regardless of length).
 
+### Hybrid retrieval rerank
+
+BM25 alone misses evidence that's topically relevant but doesn't share the query's exact keywords (e.g. a paraphrased description of a CII register). `_hybrid_rerank()` in `scorer.py` blends the two signals for each of the top `CANDIDATE_K=15` BM25 candidates:
+
+```
+blended(c) = HYBRID_ALPHA * normalized_bm25(c) + (1 - HYBRID_ALPHA) * cosine_sim(embed(c), embed(query))
+
+normalized_bm25(c) = (bm25_score(c) - min_bm25) / (max_bm25 - min_bm25)   [within the candidate set]
+```
+
+`HYBRID_ALPHA = 0.6` — BM25 still dominates (it's precise for exact terminology like "SCADA" or "PESS"), with embedding similarity contributing the rest to catch paraphrased matches. Embeddings come from `embeddings.py` (`fastembed`, 384-dim, ONNX runtime); if that's unavailable, `_hybrid_rerank` returns the candidates unchanged, i.e. plain BM25 ranking.
+
 ### LLM ensemble voting
 
 Each (field, chunk) pair is sent to 3 models independently; the chunk's score is the mean of the returned votes (`COMPLIANT=1.0`, `PARTIAL=0.5`, `NON_COMPLIANT=0.0`). Averaging across differently-trained models reduces the impact of any single model hallucinating or misreading the text. `temperature=0.0` and `max_tokens=10` keep the vote deterministic and cheap; the prompt explicitly states that no mention of the compliance aspect should be read as non-compliance.
+
+Alongside the averaged score, `vote_chunk()` reports **confidence** — how much the models agreed:
+
+```
+confidence = 1 - (max(votes) - min(votes))     [only when >= 2 votes were collected]
+```
+
+`confidence = 1.0` means every model that responded gave the same vote; `confidence = 0.0` means the votes spanned the full range (e.g. one model said COMPLIANT, another NON_COMPLIANT) — averaging those into a single "PARTIAL-looking" 0.5 would hide a real disagreement, so it's surfaced instead as `needs_review` when the field's mean confidence drops below `CONFIDENCE_THRESHOLD = 0.5`. Because voting is deterministic at `temperature=0.0`, each (model, field, chunk) vote is also cached (`llm_cache.py`, sqlite) so re-scoring a document doesn't re-spend API calls.
 
 ### Score aggregation and maturity mapping
 
@@ -251,12 +280,15 @@ app.py /score endpoint
 │  │  └─ bm25.build_index()         [C++, inverted index construction]
 │  │
 │  └─ for each of 16 FIELD_QUERIES:
-│     ├─ nciipc_cpp.query_bm25()    [C++, top-5, min score 1.0]
+│     ├─ nciipc_cpp.query_bm25()    [C++, top-15 candidates, min score 1.0]
+│     ├─ scorer._hybrid_rerank()    [BM25 + embeddings.embed() cosine sim → top 5]
 │     ├─ nciipc_cpp.get_chunk_text()
 │     ├─ explain.vote_chunk()       [LLM voting via OpenRouter]
+│     │  ├─ llm_cache.get()         [sqlite — skip the API call on a hit]
 │     │  ├─ _get_voting_models() / _get_client()
 │     │  ├─ client.chat.completions.create()
 │     │  ├─ _parse_vote()           [text → 0.0/0.5/1.0]
+│     │  ├─ llm_cache.set()         [cache successful votes only]
 │     │  └─ _log_call() / _log_error()
 │     └─ labeling_functions.score_chunk()  [fallback if LLMs fail]
 │

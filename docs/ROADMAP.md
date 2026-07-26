@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned follow-on work, grouped by theme. Phase 1 (evidence & credibility) is implemented; the rest are designed but not yet built, tracked here so the plan isn't lost between sessions.
+Planned follow-on work, grouped by theme. Phases 1 and 2 are implemented; the rest are designed but not yet built, tracked here so the plan isn't lost between sessions.
 
 ## Phase 1 — Evidence & credibility (done)
 
@@ -9,11 +9,11 @@ Planned follow-on work, grouped by theme. Phase 1 (evidence & credibility) is im
 - `scripts/benchmark_bm25.py` — reproducible C++ vs. pure-Python timing comparison
 - `scripts/generate_report_docx.py` surfaced in the README instead of being an orphaned script
 
-## Phase 2 — Retrieval & LLM robustness
+## Phase 2 — Retrieval & LLM robustness (done)
 
-- **Hybrid retrieval (BM25 + embeddings)**: rerank each field's BM25 shortlist (top ~15) with embedding cosine similarity before taking the top 5. To avoid reintroducing the heavy ML dependencies that were deliberately trimmed from `requirements.txt` (torch, sentence-transformers), use a lightweight ONNX-based embedding library (e.g. `fastembed`) or an OpenRouter-hosted embedding endpoint if available, rather than a local torch model.
-- **LLM ensemble confidence scoring**: `explain.vote_chunk()` already returns one vote per model — compute agreement (e.g. `1 - (max(votes) - min(votes))`) and surface it as `field_results[field]["confidence"]`, flagging low-confidence fields as `needs_review` in both the API response and the web UI. Requires widening `vote_chunk()`'s return contract from `list[float]` to a small dict/dataclass (`{"votes": [...], "confidence": ...}`), with `scorer.py`'s scoring loop updated accordingly.
-- **Cache LLM votes**: key a cache (sqlite, stdlib-only) by `sha256(field + chunk_text)` in `explain.vote_chunk()` — votes are deterministic at `temperature=0.0`, so a cache hit skips the API call entirely on reruns. Store at `data/processed/llm_vote_cache.sqlite` (already git-ignored).
+- **Hybrid retrieval (BM25 + embeddings)**: `scorer._hybrid_rerank()` reranks each field's BM25 shortlist (top `CANDIDATE_K=15`) by blending normalized BM25 score with embedding cosine similarity, then keeps the top 5. Uses `fastembed` (ONNX runtime, `BAAI/bge-small-en-v1.5`) rather than torch/sentence-transformers to keep the dependency footprint small — no GPU, no multi-GB install. Falls back to plain BM25 ranking if `embeddings.embed()` returns `None`.
+- **LLM ensemble confidence scoring**: `vote_chunk()` now returns `{"votes": [...], "confidence": ...}` — `confidence = 1 - (max(votes) - min(votes))`, `None` when fewer than 2 votes were collected. `scorer.py` aggregates this per field and per control as `confidence` / `needs_review` (flagged when confidence < `CONFIDENCE_THRESHOLD = 0.5`), surfaced in the API response and as a "⚠ Needs review" badge in the web UI.
+- **Cache LLM votes**: `llm_cache.py` (sqlite, stdlib-only) keys each vote by `sha256(model + field + chunk_text)`, checked in `vote_chunk()` before each model call. Only successful votes are cached, so a transient failure doesn't block a later retry. Stored at `data/processed/llm_vote_cache.sqlite` (already git-ignored).
 
 ## Phase 3 — Security features (cybersecurity-tool narrative)
 
