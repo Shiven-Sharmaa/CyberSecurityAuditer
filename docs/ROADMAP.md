@@ -1,6 +1,6 @@
 # Roadmap
 
-Planned follow-on work, grouped by theme. Phases 1–3 are implemented; the rest are designed but not yet built, tracked here so the plan isn't lost between sessions.
+Planned follow-on work, grouped by theme. Phases 1–4 are implemented; anything left is tracked in [Also considered, deferred](#also-considered-deferred) below so the plan isn't lost between sessions.
 
 ## Phase 1 — Evidence & credibility (done)
 
@@ -21,10 +21,10 @@ Planned follow-on work, grouped by theme. Phases 1–3 are implemented; the rest
 - **Sensitive-data redaction before LLM calls** (`scripts/redaction.py`): regex-based redaction (emails, phone numbers, IPs, key-like strings) applied to chunk/evidence text immediately before it's sent to OpenRouter in `vote_chunk`/`explain_control` — only the outbound payload is redacted, not the locally stored/displayed evidence, and redaction counts are logged alongside the existing `_log_call` entries.
 - **Tamper-evident audit trail** (`scripts/audit_integrity.py`, `scripts/verify_report.py`): HMAC-SHA256 (keyed by `AUDIT_SIGNING_KEY` in `.env`) over the canonical JSON of each result, added as `result["integrity"]`. Signed on both the `/score` response and the CLI's `audit_report.json`. `verify_report.py` independently re-derives and checks the signature — verified to correctly pass on untampered reports, fail on a tampered field, and fail (rather than silently pass) when checked with the wrong key.
 
-## Phase 4 — Product depth
+## Phase 4 — Product depth (done)
 
-- **Gap-analysis / remediation suggestions**: extend the `explain_control()` prompt to also ask for 2-3 concrete remediation actions per weak field, surfaced as `result[control]["remediation"]` and rendered in the web UI under each control card.
-- **OCR support for scanned PDFs**: detect near-empty `pdfplumber` extraction (heuristic: extracted characters per page below a threshold) and fall back to `pdf2image` + `pytesseract`. Requires the system `tesseract-ocr` binary — document as an optional prerequisite, not a hard requirement, since it can't be installed via pip alone.
+- **Gap-analysis / remediation suggestions**: `explain_control()`'s prompt now asks for a `FINDING:`/`REMEDIATION:` formatted response in one call — `_parse_finding_response()` splits it into `{"finding": str, "remediation": list[str]}`. Surfaced as `result[control]["remediation"]` in the API and rendered as a "Recommended actions" list under each control card in the web UI. Verified with realistic and edge-case model outputs (multiple actions, "none needed," and unformatted fallback text).
+- **OCR support for scanned PDFs**: `pipeline.extract_from_pdf()` detects a likely scanned PDF (average extracted characters per page below `_OCR_MIN_CHARS_PER_PAGE = 40`) and retries with `pytesseract` + `pdf2image` (falling back silently to whatever pdfplumber found if those packages or the system `tesseract-ocr`/`poppler` binaries aren't installed). Verified end-to-end: a synthetic image-only PDF correctly triggers OCR and extracts its text, while a normal text-layer PDF correctly skips it.
 
 ## Also considered, deferred
 

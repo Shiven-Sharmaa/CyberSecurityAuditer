@@ -305,6 +305,21 @@
     }
     .card .finding { color: #4b5563; font-size: 14px; line-height: 1.65; }
     .card .no-finding { color: #9ca3af; font-size: 14px; font-style: italic; }
+    .remediation {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed #e5e7eb;
+    }
+    .remediation h4 {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin-bottom: 6px;
+    }
+    .remediation ul { padding-left: 18px; }
+    .remediation li { color: #4b5563; font-size: 13.5px; line-height: 1.6; }
 
     .signature {
       margin-top: 24px;
@@ -503,6 +518,12 @@
           const reviewBadge = c.needs_review
             ? `<span class="review-badge" title="${reviewReason}">⚠ Needs review</span>`
             : "";
+          const remediation = (c.remediation && c.remediation.length)
+            ? `<div class="remediation">
+                 <h4>Recommended actions</h4>
+                 <ul>${c.remediation.map(r => `<li>${r}</li>`).join("")}</ul>
+               </div>`
+            : "";
 
           cards.innerHTML += `
             <div class="card">
@@ -515,6 +536,7 @@
                 </div>
               </div>
               ${finding}
+              ${remediation}
             </div>`;
         }
 

@@ -18,7 +18,7 @@ Full technical write-up (pipeline internals, algorithms, file-by-file breakdown,
 Upload (PDF/DOCX/TXT/URL)
         │
         ▼
-  Text extraction  (pdfplumber / python-docx / trafilatura)
+  Text extraction  (pdfplumber + OCR fallback / python-docx / trafilatura)
         │
         ▼
   Sliding-window chunking  (C++, 512-token window / 384 stride)
@@ -36,7 +36,7 @@ Upload (PDF/DOCX/TXT/URL)
   Score aggregation → per-control scores + confidence → maturity level (L1–L5)
         │
         ▼
-  LLM-generated audit findings + JSON response → web UI
+  LLM-generated findings + remediation + signed JSON response → web UI
 ```
 
 The retrieval and chunking layer is implemented in C++ (exposed to Python via pybind11) since it's the part of the pipeline that runs on every request; everything else is Python.
@@ -52,6 +52,12 @@ Python 3.10+ · Flask · C++17 (pybind11) · OpenRouter (LLM ensemble voting, wi
 - Python 3.10+
 - CMake 3.16+
 - A C++17 compiler (gcc/clang on Linux/macOS, MinGW-w64 or MSVC on Windows)
+- *Optional* — `tesseract-ocr` and `poppler`, only needed for OCR on scanned PDFs (see [Design notes](#design-notes)):
+  ```bash
+  brew install tesseract poppler        # macOS
+  apt install tesseract-ocr poppler-utils   # Debian/Ubuntu
+  ```
+  Without these, scanned PDFs just extract as much as pdfplumber's text layer finds (often little to nothing) — everything else works normally.
 
 ### Setup
 
@@ -77,6 +83,8 @@ cmake --build . --config Release
 ```
 
 This produces `nciipc_cpp` (a `.so` on Linux/macOS, a `.pyd` on Windows) which `scripts/scorer.py` imports directly.
+
+Note: the first time anything calls `embeddings.embed()` (i.e. the first real scoring run), `fastembed` downloads its ~130MB embedding model — a one-time delay, cached afterward. If that download fails (offline, blocked network), hybrid retrieval just falls back to plain BM25 ranking; nothing else is affected.
 
 ### Run
 
@@ -170,4 +178,12 @@ web/
 - **Hybrid BM25 + embedding retrieval**: each field's BM25 shortlist (top 15) is reranked by blending normalized BM25 score with embedding cosine similarity (`scorer._hybrid_rerank`) before taking the final top 5 — catches evidence that's topically relevant but doesn't share exact keywords with the query. Uses `fastembed` (ONNX runtime) rather than torch/sentence-transformers to keep the dependency footprint small; falls back to BM25-only ranking if embeddings aren't available.
 - **LLM ensemble confidence, not just an average**: `vote_chunk()` reports agreement across the 3 models (`1 - (max(votes) - min(votes))`) alongside the vote itself. Fields where the models disagree are flagged `needs_review` in the API response and the web UI, instead of silently averaging away a disagreement between "clearly compliant" and "clearly non-compliant."
 - **LLM vote caching**: voting runs at `temperature=0.0`, so a given (model, field, chunk) vote is deterministic — `llm_cache.py` caches it in sqlite so re-scoring the same document doesn't re-spend API calls or wall-clock time.
+- **Gap analysis, not just a finding**: `explain_control()` asks the LLM for a `FINDING:`/`REMEDIATION:` formatted response in one call — a 3-sentence finding plus concrete remediation actions for the control's weak areas, both grounded in the same evidence. Moves the tool from "here's your score" to "here's what to fix," while still costing exactly one API call.
+- **OCR as a graceful fallback, not a hard requirement**: `pipeline.extract_from_pdf()` detects a likely scanned PDF (very little text per page from pdfplumber) and retries with `pytesseract` + `pdf2image` if they and the system `tesseract-ocr`/`poppler` binaries are available — verified against both a real scanned-style PDF (OCR triggers and extracts the text) and a normal text-layer PDF (OCR is correctly skipped). If OCR isn't available, extraction just proceeds with whatever pdfplumber found.
 - **Absence of evidence is evidence of non-compliance**: fields with no matching chunks above the BM25 threshold score 0 rather than being skipped, which is the correct behavior for a compliance auditor.
+
+## Known limitations
+
+- The evaluation set (`scripts/evaluate.py`, `scripts/smoke_test.py`) is 9 labeled synthetic documents — enough to catch regressions, not a statistically meaningful accuracy claim. See [docs/ROADMAP.md](docs/ROADMAP.md).
+- OpenRouter's free-tier model catalog changes over time; the hardcoded defaults (`OPENROUTER_MODEL`, the voting model list) can go stale and start returning 404s. If findings/votes silently fall back to labeling functions or fail outright, check the model IDs against OpenRouter's current free-tier list and update `.env`.
+- The phone-number and international-format coverage in `redaction.py`'s regexes is intentionally conservative (to avoid false positives on things like page counts or dates) — it will miss some formats.

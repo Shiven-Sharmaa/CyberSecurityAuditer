@@ -90,13 +90,16 @@ def score():
         result = score_documents(texts)
         result["sources"] = sources
 
-        # LLM findings for the combined result only
+        # LLM findings + remediation for the combined result only
         for ctrl in ("PC1", "PC2", "PC3"):
             d = result[ctrl]
             try:
-                result[ctrl]["finding"] = explain_control(ctrl, d["score"], d["maturity"], d["fields"])
+                explanation = explain_control(ctrl, d["score"], d["maturity"], d["fields"])
+                result[ctrl]["finding"] = explanation["finding"]
+                result[ctrl]["remediation"] = explanation["remediation"]
             except Exception:
                 result[ctrl]["finding"] = ""
+                result[ctrl]["remediation"] = []
 
         # Per-document breakdown (when multiple files uploaded)
         if len(texts) > 1:

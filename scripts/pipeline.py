@@ -26,14 +26,52 @@ sys.path.insert(0, str(_ROOT / "nciipc-prep" / "build"))
 # Text extraction
 # ---------------------------------------------------------------------------
 
+_OCR_MIN_CHARS_PER_PAGE = 40  # below this average, a page is probably a scanned image
+
+
+def _try_ocr(path: str) -> str | None:
+    """
+    OCR fallback for scanned/image PDFs where pdfplumber's text layer is
+    empty or near-empty. Requires pytesseract + pdf2image (pip) plus the
+    system tesseract-ocr and poppler binaries — all optional; returns None
+    if any of them is missing so the caller just keeps whatever pdfplumber
+    already extracted rather than failing outright.
+    """
+    try:
+        import pytesseract
+        from pdf2image import convert_from_path
+    except ImportError:
+        print("  OCR fallback unavailable: pip install pytesseract pdf2image "
+              "(plus the system tesseract-ocr and poppler binaries) to enable it.")
+        return None
+
+    try:
+        images = convert_from_path(path)
+        text = "\n".join(pytesseract.image_to_string(img) for img in images)
+        return text if text.strip() else None
+    except Exception as exc:
+        print(f"  OCR attempt failed ({type(exc).__name__}: {exc}) — "
+              f"check that tesseract-ocr and poppler are installed.")
+        return None
+
+
 def extract_from_pdf(path: str) -> str:
     import pdfplumber
     text = ""
     with pdfplumber.open(path) as pdf:
+        page_count = len(pdf.pages)
         for page in pdf.pages:
             t = page.extract_text()
             if t:
                 text += t + "\n"
+
+    # A likely scanned/image PDF: pdfplumber's text layer found almost nothing.
+    if page_count and (len(text) / page_count) < _OCR_MIN_CHARS_PER_PAGE:
+        print(f"  Only {len(text)} chars across {page_count} page(s) — looks scanned, trying OCR ...")
+        ocr_text = _try_ocr(path)
+        if ocr_text:
+            text = ocr_text
+
     # Drop repeated lines (headers / footers / page numbers)
     lines = text.splitlines()
     freq = Counter(l.strip() for l in lines)
@@ -108,18 +146,20 @@ def run(source: str) -> dict:
     result = score_documents([text])
     print(f"      Company score: {result['company_score']:.1f}/100")
 
-    # Step 3: LLM findings
+    # Step 3: LLM findings + remediation
     print("[3/3] Generating findings (OpenRouter) ...")
     for control in ("PC1", "PC2", "PC3"):
         data = result[control]
         try:
-            finding = explain_control(
+            explanation = explain_control(
                 control, data["score"], data["maturity"], data["fields"]
             )
+            finding, remediation = explanation["finding"], explanation["remediation"]
         except Exception as e:
-            finding = ""
+            finding, remediation = "", []
             print(f"      LLM unavailable for {control}: {e}")
         result[control]["finding"] = finding
+        result[control]["remediation"] = remediation
         print(f"      {control}: {data['score']:.1f}/100  ({data['maturity']})")
 
     return result
@@ -151,6 +191,8 @@ if __name__ == "__main__":
         print(f"  {ctrl}  {d['score']:>5.1f}/100  {d['maturity']}")
         if d.get("finding"):
             print(f"       {d['finding'][:180]}")
+        for action in d.get("remediation", []):
+            print(f"       -> {action[:160]}")
     print("=" * 52)
 
     out = _ROOT / "data" / "processed" / "scores.json"

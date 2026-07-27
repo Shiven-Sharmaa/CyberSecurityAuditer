@@ -42,7 +42,7 @@ User uploads file(s) via web UI
         │
         ▼
 [1] TEXT EXTRACTION  (pipeline.py)
-    PDF  → pdfplumber
+    PDF  → pdfplumber (OCR fallback via pytesseract+pdf2image if the text layer is near-empty)
     DOCX → python-docx
     TXT  → direct file read
     URL  → trafilatura
@@ -76,12 +76,12 @@ User uploads file(s) via web UI
         ▼
 [7] EXPLANATION  (explain.py explain_control)
     One LLM call per control with weak/medium/strong evidence snippets
-    Generates a 3-sentence audit finding
+    Generates a 3-sentence finding + concrete remediation actions (FINDING:/REMEDIATION: format)
     Fallback: OpenRouter → local Ollama
         │
         ▼
-[8] RESULTS returned as JSON to the web UI
-    Rendered as score badges, control cards, findings, and a per-document table
+[8] RESULTS signed (HMAC-SHA256) and returned as JSON to the web UI
+    Rendered as score badges, control cards, findings, remediation lists, and a per-document table
 ```
 
 ## Worked example: 3 documents uploaded
@@ -100,7 +100,7 @@ The `analyse()` function in `index.html` reads the selected files, builds a `For
 
 `pipeline.extract_text(path)` dispatches on file extension:
 
-- **PDF** — `pdfplumber.open(path)`, iterating every page's `extract_text()`. A header/footer dedup pass then removes any line (stripped) that repeats more than 5 times across the document — this strips running headers, footers, and page numbers without touching legitimately repeated content.
+- **PDF** — `pdfplumber.open(path)`, iterating every page's `extract_text()`. If the average extracted characters per page falls below `_OCR_MIN_CHARS_PER_PAGE = 40` (a likely scanned/image PDF), `_try_ocr()` retries with `pdf2image.convert_from_path()` + `pytesseract.image_to_string()` per page — this needs the system `tesseract-ocr` and `poppler` binaries in addition to their pip packages, so it's a soft fallback: missing either just means the OCR attempt is skipped and pdfplumber's (possibly empty) result is kept. A header/footer dedup pass then removes any line (stripped) that repeats more than 5 times across the document — this strips running headers, footers, and page numbers without touching legitimately repeated content.
 - **DOCX** — `python-docx`'s `Document(path)`; collects non-empty paragraph text, then walks every table row and joins non-empty cells with `" | "` so tabular compliance data (checklists, criteria tables) survives extraction.
 - **TXT** — `Path(source).read_text(encoding="utf-8", errors="ignore")`.
 
@@ -128,9 +128,10 @@ The `analyse()` function in `index.html` reads the selected files, builds a `For
 For each control, `app.py` calls `explain_control(control, score, maturity, fields)`:
 
 1. Fields are split into three bands: weak (`< 50`), medium (`50–64`), strong (`>= 65`).
-2. Up to 3 weak + 2 medium + 2 strong `best_chunk` snippets (200 chars each) are concatenated into an evidence block — all three bands contribute evidence, so no score range is silently excluded from the explanation.
-3. A prompt asks for a 3-sentence audit finding grounded only in that evidence, sent to OpenRouter at `temperature=0.1`.
-4. On repeated failure, falls back to a local Ollama call (`ollama.generate(model="mistral", ...)`).
+2. Up to 3 weak + 2 medium + 2 strong `best_chunk` snippets (200 chars each) are concatenated into an evidence block — all three bands contribute evidence, so no score range is silently excluded from the explanation. The block is redacted (`redaction.redact()`) before it enters the prompt.
+3. A single prompt asks for a `FINDING:`/`REMEDIATION:` formatted response grounded only in that evidence — a 3-sentence finding plus concrete remediation actions for the weak areas — sent to OpenRouter at `temperature=0.1`.
+4. On repeated failure, falls back to a local Ollama call (`ollama.generate(model="mistral", ...)`) with the same prompt.
+5. `_parse_finding_response()` splits the raw text into `{"finding": str, "remediation": list[str]}`; if the model didn't follow the format, the whole response becomes the finding and `remediation` is empty rather than the call failing.
 
 ### Phase 5 — per-document breakdown
 
@@ -138,7 +139,7 @@ When more than one file is uploaded, each document is scored again individually 
 
 ### Phase 6 — response → browser
 
-`app.py` assembles the final JSON (`company_score`, per-control scores/maturity/findings/fields, `per_doc`), deletes all temp files in the `finally` block, and returns it. The frontend renders the hero score, per-control cards with findings, and (if multiple documents were uploaded) the per-document table.
+`app.py` assembles the final JSON (`company_score`, per-control scores/maturity/findings/remediation/fields, `per_doc`), signs it with `audit_integrity.sign()`, deletes all temp files in the `finally` block, and returns it. The frontend renders the hero score, per-control cards with findings and a "Recommended actions" list, a signature footer, and (if multiple documents were uploaded) the per-document table.
 
 ## File-by-file breakdown
 
@@ -154,7 +155,7 @@ HTTP entry point. Serves the web UI at `/` (static files from `web/`) and handle
 
 ### `scripts/pipeline.py` — text extraction + CLI runner
 
-`extract_from_pdf`, `extract_from_docx`, `extract_from_url`, and the `extract_text` dispatcher (see [Phase 2](#phase-2--text-extraction) above), plus `run(source)` — an end-to-end CLI pipeline (extract → score → explain) used by the `python scripts/pipeline.py <file-or-url>` entry point.
+`extract_from_pdf` (with the OCR fallback via `_try_ocr()`, see [Phase 2](#phase-2--text-extraction) above), `extract_from_docx`, `extract_from_url`, and the `extract_text` dispatcher, plus `run(source)` — an end-to-end CLI pipeline (extract → score → explain) used by the `python scripts/pipeline.py <file-or-url>` entry point. `_try_ocr()` imports `pytesseract`/`pdf2image` lazily and catches both `ImportError` (packages not installed) and any runtime exception (system `tesseract-ocr`/`poppler` binaries missing), returning `None` either way so extraction degrades to whatever pdfplumber found rather than failing.
 
 ### `scripts/scorer.py` — retrieval + scoring engine
 
@@ -162,7 +163,7 @@ HTTP entry point. Serves the web UI at `/` (static files from `web/`) and handle
 
 ### `scripts/explain.py` — LLM voting + finding generation
 
-`vote_chunk(field, chunk_text)` and `explain_control(control, score, maturity, fields)` (see [Phase 3](#phase-3--combined-scoring) and [Phase 4](#phase-4--llm-explanations)). Both use an OpenRouter client (OpenAI-compatible, `base_url=https://openrouter.ai/api/v1`) with 4-attempt exponential backoff with jitter, and log every call (success or failure) to `logs/llm_calls/YYYY-MM-DD.jsonl` / `.errors.jsonl`. `vote_chunk` checks `llm_cache` before calling each model and returns `{"votes": [...], "confidence": ...}` rather than a bare list (see [LLM ensemble voting](#llm-ensemble-voting)). Both functions run `redaction.redact()` on the text before it enters the prompt (only the outbound copy — the original is unaffected), and both prompts explicitly frame the excerpt as untrusted document content to evaluate, never as instructions to follow, regardless of whether `prompt_injection.py` flagged anything. `generate_report(scores_path)` batch-generates findings from a previously saved `scores.json` and signs the resulting report with `audit_integrity.sign()`.
+`vote_chunk(field, chunk_text)` and `explain_control(control, score, maturity, fields)` (see [Phase 3](#phase-3--combined-scoring) and [Phase 4](#phase-4--llm-explanations)). Both use an OpenRouter client (OpenAI-compatible, `base_url=https://openrouter.ai/api/v1`) with 4-attempt exponential backoff with jitter, and log every call (success or failure) to `logs/llm_calls/YYYY-MM-DD.jsonl` / `.errors.jsonl`. `vote_chunk` checks `llm_cache` before calling each model and returns `{"votes": [...], "confidence": ...}` rather than a bare list (see [LLM ensemble voting](#llm-ensemble-voting)). Both functions run `redaction.redact()` on the text before it enters the prompt (only the outbound copy — the original is unaffected), and both prompts explicitly frame the excerpt as untrusted document content to evaluate, never as instructions to follow, regardless of whether `prompt_injection.py` flagged anything. `explain_control` returns `{"finding": str, "remediation": list[str]}` — see [`_parse_finding_response()`](#phase-4--llm-explanations) — rather than a bare string. `generate_report(scores_path)` batch-generates findings from a previously saved `scores.json` and signs the resulting report with `audit_integrity.sign()`.
 
 ### `scripts/embeddings.py` — local embeddings for hybrid retrieval
 
@@ -214,7 +215,7 @@ Locates `pybind11`'s CMake config from the active Python environment (`python -m
 
 ### `web/index.html` — frontend
 
-Self-contained HTML/CSS/JS, no build step or framework. File upload (multi-file) and URL input, both posting to `/score`; renders the overall score, per-control cards (score badge, maturity badge, finding text), and — when multiple documents were analysed — a per-document score table.
+Self-contained HTML/CSS/JS, no build step or framework. File upload (multi-file) and URL input, both posting to `/score`; renders the overall score, per-control cards (score badge, maturity badge, "⚠ Needs review" badge when applicable, finding text, and a "Recommended actions" list from `remediation`), a signature footer (HMAC algorithm, first 16 hex chars, timestamp — see `audit_integrity.py`), and — when multiple documents were analysed — a per-document score table.
 
 ## Algorithms and formulas
 
@@ -259,6 +260,19 @@ confidence = 1 - (max(votes) - min(votes))     [only when >= 2 votes were collec
 
 `confidence = 1.0` means every model that responded gave the same vote; `confidence = 0.0` means the votes spanned the full range (e.g. one model said COMPLIANT, another NON_COMPLIANT) — averaging those into a single "PARTIAL-looking" 0.5 would hide a real disagreement, so it's surfaced instead as `needs_review` when the field's mean confidence drops below `CONFIDENCE_THRESHOLD = 0.5`. Because voting is deterministic at `temperature=0.0`, each (model, field, chunk) vote is also cached (`llm_cache.py`, sqlite) so re-scoring a document doesn't re-spend API calls.
 
+### Gap-analysis / remediation format
+
+`explain_control()` asks for the finding and remediation actions in a single call rather than two, using a fixed response format:
+
+```
+FINDING: <3 sentences citing specific evidence>
+REMEDIATION:
+- <concrete action for a weak area>
+- <concrete action for another weak area, if applicable>
+```
+
+`_parse_finding_response()` extracts each section with a regex (`FINDING:\s*(.+?)(?=REMEDIATION:|$)` and `REMEDIATION:\s*(.+)`), strips bullet markers from each remediation line, and drops lines like "(none needed...)" so an empty remediation list renders as no section at all rather than a placeholder bullet. If the model doesn't follow the format, the whole response becomes the finding and remediation is empty — a parsing failure degrades the feature, it doesn't break the call.
+
 ### Score aggregation and maturity mapping
 
 ```
@@ -287,7 +301,7 @@ LLM API calls retry up to 4 times with jittered exponential backoff: `wait = bas
 ```
 app.py /score endpoint
 ├─ pipeline.extract_text()
-│  ├─ extract_from_pdf()      [pdfplumber]
+│  ├─ extract_from_pdf()      [pdfplumber, falls back to _try_ocr() if the text layer is near-empty]
 │  ├─ extract_from_docx()     [python-docx]
 │  ├─ extract_from_url()      [trafilatura]
 │  └─ read TXT file           [Path.read_text]

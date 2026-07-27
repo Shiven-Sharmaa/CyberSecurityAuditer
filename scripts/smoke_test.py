@@ -513,7 +513,7 @@ def main() -> None:
 
         all_findings_ok = True
         for ctrl in ("PC1", "PC2", "PC3"):
-            finding = report.get("findings", {}).get(ctrl, "")
+            finding = report.get("findings", {}).get(ctrl, {}).get("finding", "")
             if not finding or len(finding) < 50:
                 all_findings_ok = False
                 failures.append(
