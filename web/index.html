@@ -306,6 +306,14 @@
     .card .finding { color: #4b5563; font-size: 14px; line-height: 1.65; }
     .card .no-finding { color: #9ca3af; font-size: 14px; font-style: italic; }
 
+    .signature {
+      margin-top: 24px;
+      font-size: 11px;
+      color: #9ca3af;
+      font-family: 'SF Mono', 'Courier New', monospace;
+      text-align: center;
+    }
+
     /* ── Per-doc table ── */
     #perDoc { margin-top: 24px; display: none; }
     #perDoc h3 {
@@ -412,6 +420,8 @@
         <tbody id="docRows"></tbody>
       </table>
     </div>
+
+    <p id="signature" class="signature"></p>
   </div>
 
   <script>
@@ -487,8 +497,11 @@
           const finding = c.finding
             ? `<p class="finding">${c.finding}</p>`
             : `<p class="no-finding">No LLM finding available (check OPENROUTER_API_KEY).</p>`;
+          const reviewReason = c.prompt_injection_suspected
+            ? "A retrieved excerpt matched a prompt-injection pattern — verify this finding manually"
+            : "LLM voters disagreed on one or more fields";
           const reviewBadge = c.needs_review
-            ? `<span class="review-badge" title="LLM voters disagreed on one or more fields">⚠ Needs review</span>`
+            ? `<span class="review-badge" title="${reviewReason}">⚠ Needs review</span>`
             : "";
 
           cards.innerHTML += `
@@ -524,6 +537,12 @@
         } else {
           perDoc.style.display = "none";
         }
+
+        // Tamper-evident signature (see audit_integrity.py)
+        const sig = document.getElementById("signature");
+        sig.textContent = data.integrity
+          ? `Signed ${data.integrity.algorithm} · ${data.integrity.hmac.slice(0, 16)}… · ${data.integrity.generated_at}`
+          : "";
 
         results.style.display = "block";
 

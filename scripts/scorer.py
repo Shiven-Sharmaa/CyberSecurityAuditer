@@ -17,6 +17,7 @@ from labeling_functions import (
 )
 from explain import vote_chunk
 import embeddings
+import prompt_injection
 
 # ---------------------------------------------------------------------------
 # Query definitions
@@ -134,8 +135,14 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
             # No evidence found — absence = non-compliant
             print(f"  [{field}] No qualifying chunks — non-compliant (0.0).")
             field_results[field] = {"score": 0.0, "best_chunk": "",
-                                     "confidence": None, "needs_review": False}
+                                     "confidence": None, "needs_review": False,
+                                     "prompt_injection_suspected": False}
             continue
+
+        # Flag chunks that look like a prompt-injection attempt regardless of
+        # scoring path (LLM or LF) — the concern is the document's content,
+        # not which scorer happens to handle it. See prompt_injection.py.
+        injection_suspected = any(prompt_injection.looks_suspicious(t) for t in texts)
 
         # Score each retrieved chunk: try LLM voting, fall back to LFs
         chunk_scores = []
@@ -160,7 +167,8 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
         total_chunks = llm_chunks + lf_chunks
         llm_coverage = round(llm_chunks / total_chunks, 2) if total_chunks else 0.0
         field_confidence = round(mean(confidences), 2) if confidences else None
-        needs_review = field_confidence is not None and field_confidence < CONFIDENCE_THRESHOLD
+        low_confidence = field_confidence is not None and field_confidence < CONFIDENCE_THRESHOLD
+        needs_review = low_confidence or injection_suspected
 
         # Best chunk = highest score
         best_idx   = chunk_scores.index(max(chunk_scores))
@@ -172,7 +180,10 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
             "llm_coverage": llm_coverage,
             "confidence": field_confidence,
             "needs_review": needs_review,
+            "prompt_injection_suspected": injection_suspected,
         }
+        if injection_suspected:
+            print(f"  [{field}] WARNING: possible prompt-injection pattern in retrieved text.")
         print(f"  [{field}] score={field_score:.1f}/100  best_chunk_len={len(best_chunk)}"
               f"  confidence={field_confidence}")
 
@@ -193,6 +204,10 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
 
     def control_needs_review(prefix: str) -> bool:
         return any(v["needs_review"] for k, v in field_results.items() if k.startswith(prefix))
+
+    def control_injection_suspected(prefix: str) -> bool:
+        return any(v["prompt_injection_suspected"]
+                   for k, v in field_results.items() if k.startswith(prefix))
 
     pc1_score = control_score("PC1")
     pc2_score = control_score("PC2")
@@ -215,6 +230,7 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
             "has_evidence": control_has_evidence("PC1"),
             "confidence":   control_confidence("PC1"),
             "needs_review": control_needs_review("PC1"),
+            "prompt_injection_suspected": control_injection_suspected("PC1"),
             "fields":       control_fields("PC1"),
         },
         "PC2": {
@@ -223,6 +239,7 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
             "has_evidence": control_has_evidence("PC2"),
             "confidence":   control_confidence("PC2"),
             "needs_review": control_needs_review("PC2"),
+            "prompt_injection_suspected": control_injection_suspected("PC2"),
             "fields":       control_fields("PC2"),
         },
         "PC3": {
@@ -231,6 +248,7 @@ def score_documents(doc_texts: list[str], use_llm: bool = True) -> dict:
             "has_evidence": control_has_evidence("PC3"),
             "confidence":   control_confidence("PC3"),
             "needs_review": control_needs_review("PC3"),
+            "prompt_injection_suspected": control_injection_suspected("PC3"),
             "fields":       control_fields("PC3"),
         },
     }

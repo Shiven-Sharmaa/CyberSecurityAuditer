@@ -40,6 +40,7 @@ def score():
     from pipeline import extract_text
     from scorer import score_documents
     from explain import explain_control
+    from audit_integrity import sign as sign_result
 
     # Rate limit check
     ip = request.remote_addr or "unknown"
@@ -110,6 +111,10 @@ def score():
                     "PC3": {k: doc_result["PC3"][k] for k in ("score", "maturity", "has_evidence")},
                 })
             result["per_doc"] = per_doc
+
+        # Sign the result so it can be checked for tampering later — see
+        # audit_integrity.py / scripts/verify_report.py
+        result["integrity"] = sign_result(result)
 
         return jsonify(result)
 

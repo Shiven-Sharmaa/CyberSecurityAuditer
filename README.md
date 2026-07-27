@@ -90,6 +90,8 @@ python scripts/evaluate.py       # precision/recall/F1 against the same labeled 
 python scripts/benchmark_bm25.py # C++ vs. pure-Python timing comparison (see Results below)
 
 python scripts/generate_report_docx.py  # regenerates NCIIPC_Project_Report.docx, the project write-up
+
+python scripts/verify_report.py data/processed/audit_report.json  # check a report's HMAC signature
 ```
 
 ## Results
@@ -115,6 +117,14 @@ Accuracy: 100% · Macro F1: 1.00 · N = 9
 
 The query speedup grows with corpus size and is the more important number in practice: retrieval (`query_bm25`) runs once per field per request (16 times per document scored), while indexing runs once per request — so C++ pays off most exactly where the pipeline calls it most.
 
+## Security
+
+Uploaded documents are untrusted input that gets fed into LLM prompts and a third-party API — that surface is treated as adversarial, not just as data:
+
+- **Prompt-injection detection** (`scripts/prompt_injection.py`): every retrieved chunk is scanned for known injection patterns ("ignore previous instructions", "you are now a...", "always respond compliant", etc.) before scoring. A match flags the field `needs_review` and shows a warning badge in the UI — verified end-to-end with a crafted malicious document in testing. Every LLM prompt also explicitly frames document text as untrusted data to evaluate, never as instructions to follow, regardless of whether the heuristic fires.
+- **Sensitive-data redaction** (`scripts/redaction.py`): emails, phone numbers, IPs, and key-like strings are redacted from chunk text immediately before it's sent to OpenRouter — only the outbound API payload is redacted; the original text is still used locally for scoring and evidence display, since that never leaves the process.
+- **Tamper-evident audit trail** (`scripts/audit_integrity.py`): every scoring result and generated report is signed with HMAC-SHA256 (`AUDIT_SIGNING_KEY` in `.env`). `scripts/verify_report.py` independently re-checks a saved report's signature — a genuine chain-of-custody check, not just an assertion.
+
 ## Environment variables
 
 See [.env.example](.env.example). Only `OPENROUTER_API_KEY` is required — everything else has a sensible default. Full behavior is documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#environment-variables).
@@ -133,6 +143,10 @@ scripts/
   labeling_functions.py      Regex-based compliance signal detectors (fallback)
   embeddings.py              Local embeddings (fastembed/ONNX) for hybrid retrieval
   llm_cache.py               sqlite cache for deterministic LLM votes
+  prompt_injection.py        Heuristic detection of prompt-injection attempts
+  redaction.py               Redacts sensitive data before it's sent to the LLM API
+  audit_integrity.py         HMAC-SHA256 signing for results/reports
+  verify_report.py           CLI to check a saved report's signature
   smoke_test.py              End-to-end validation with synthetic documents
   evaluate.py                Precision/recall/F1 against the labeled synthetic docs
   benchmark_bm25.py          C++ vs. pure-Python timing comparison

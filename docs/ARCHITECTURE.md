@@ -25,6 +25,7 @@ All environment variables are loaded from a `.env` file in the project root via 
 | `OPENROUTER_API_KEY` | Yes | — | Your OpenRouter API key |
 | `OPENROUTER_MODEL` | No | `google/gemma-3-27b-it:free` | Model used by `explain_control()` for audit findings |
 | `OPENROUTER_VOTING_MODELS` | No | see below | Comma-separated model list for `vote_chunk()` |
+| `AUDIT_SIGNING_KEY` | No (recommended) | ephemeral, per-process | HMAC-SHA256 key for signing results/reports (see [Security measures](#security-measures)) |
 
 If `OPENROUTER_VOTING_MODELS` isn't set, three free models are used by default:
 
@@ -148,6 +149,7 @@ HTTP entry point. Serves the web UI at `/` (static files from `web/`) and handle
 - `MAX_CONTENT_LENGTH = 50 MB` — oversized uploads get HTTP 413 automatically.
 - Rate limiting: per-IP sliding window, 10 requests / 60s, HTTP 429 when exceeded. Idle IPs are evicted from the tracking dict once their window empties, to bound memory growth.
 - `/score` accepts either multipart file uploads or a JSON/form `url` field, extracts text, scores documents together (one shared BM25 index), generates per-control findings, and — when 2+ documents were submitted — a per-document breakdown.
+- The final response is signed with `audit_integrity.sign()` before it's returned, added as an `"integrity"` key — see [Security measures](#security-measures).
 - Runs with `threaded=False` deliberately: the C++ extension holds global mutable index state (`g_index`, `g_chunks`) with no locking, so concurrent requests would corrupt each other's results.
 
 ### `scripts/pipeline.py` — text extraction + CLI runner
@@ -156,11 +158,11 @@ HTTP entry point. Serves the web UI at `/` (static files from `web/`) and handle
 
 ### `scripts/scorer.py` — retrieval + scoring engine
 
-`FIELD_QUERIES` — 16 BM25 query strings, 5 for PC1, 4 for PC2, 6 unique for PC3 (`PC1_register/criteria/review/weakness/strength`, `PC2_vertical/horizontal/weakness/strength`, `PC3_ciso/isd/soc/audit/functions/weakness`). `FIELD_TO_LFS` maps each control prefix to its labeling-function list for the LLM fallback path. `maturity(score)` maps a 0–100 score to `L1`–`L5`. `_hybrid_rerank(query, candidates, get_text)` blends BM25 and embedding similarity (see [Phase 3](#phase-3--combined-scoring)). `score_documents(doc_texts, use_llm=True)` is the central function described in [Phase 3](#phase-3--combined-scoring) above; each field result also reports `llm_coverage` (fraction of chunks scored by LLM voting versus regex fallback), `confidence` (mean LLM-ensemble agreement, or `None`), and `needs_review` (confidence below threshold).
+`FIELD_QUERIES` — 16 BM25 query strings, 5 for PC1, 4 for PC2, 6 unique for PC3 (`PC1_register/criteria/review/weakness/strength`, `PC2_vertical/horizontal/weakness/strength`, `PC3_ciso/isd/soc/audit/functions/weakness`). `FIELD_TO_LFS` maps each control prefix to its labeling-function list for the LLM fallback path. `maturity(score)` maps a 0–100 score to `L1`–`L5`. `_hybrid_rerank(query, candidates, get_text)` blends BM25 and embedding similarity (see [Phase 3](#phase-3--combined-scoring)). `score_documents(doc_texts, use_llm=True)` is the central function described in [Phase 3](#phase-3--combined-scoring) above; each field result also reports `llm_coverage` (fraction of chunks scored by LLM voting versus regex fallback), `confidence` (mean LLM-ensemble agreement, or `None`), `prompt_injection_suspected` (from `prompt_injection.py`, checked on every retrieved chunk regardless of scoring path), and `needs_review` (true when confidence is below threshold **or** injection is suspected).
 
 ### `scripts/explain.py` — LLM voting + finding generation
 
-`vote_chunk(field, chunk_text)` and `explain_control(control, score, maturity, fields)` (see [Phase 3](#phase-3--combined-scoring) and [Phase 4](#phase-4--llm-explanations)). Both use an OpenRouter client (OpenAI-compatible, `base_url=https://openrouter.ai/api/v1`) with 4-attempt exponential backoff with jitter, and log every call (success or failure) to `logs/llm_calls/YYYY-MM-DD.jsonl` / `.errors.jsonl`. `vote_chunk` checks `llm_cache` before calling each model and returns `{"votes": [...], "confidence": ...}` rather than a bare list (see [LLM ensemble voting](#llm-ensemble-voting)). `generate_report(scores_path)` batch-generates findings from a previously saved `scores.json`.
+`vote_chunk(field, chunk_text)` and `explain_control(control, score, maturity, fields)` (see [Phase 3](#phase-3--combined-scoring) and [Phase 4](#phase-4--llm-explanations)). Both use an OpenRouter client (OpenAI-compatible, `base_url=https://openrouter.ai/api/v1`) with 4-attempt exponential backoff with jitter, and log every call (success or failure) to `logs/llm_calls/YYYY-MM-DD.jsonl` / `.errors.jsonl`. `vote_chunk` checks `llm_cache` before calling each model and returns `{"votes": [...], "confidence": ...}` rather than a bare list (see [LLM ensemble voting](#llm-ensemble-voting)). Both functions run `redaction.redact()` on the text before it enters the prompt (only the outbound copy — the original is unaffected), and both prompts explicitly frame the excerpt as untrusted document content to evaluate, never as instructions to follow, regardless of whether `prompt_injection.py` flagged anything. `generate_report(scores_path)` batch-generates findings from a previously saved `scores.json` and signs the resulting report with `audit_integrity.sign()`.
 
 ### `scripts/embeddings.py` — local embeddings for hybrid retrieval
 
@@ -169,6 +171,22 @@ Thin wrapper around `fastembed.TextEmbedding` (`BAAI/bge-small-en-v1.5`, 384-dim
 ### `scripts/llm_cache.py` — sqlite cache for LLM votes
 
 Keyed by `sha256(model + field + chunk_text)`, stored at `data/processed/llm_vote_cache.sqlite`. Only successful votes are cached — a transient model failure is never cached, so it doesn't block a later retry once the model recovers. `get()`/`set()` open a short-lived connection per call rather than holding one open, which is simple and safe under Flask's single-threaded (`threaded=False`) serving model.
+
+### `scripts/prompt_injection.py` — prompt-injection detection
+
+`detect(text)` runs a fixed list of regex patterns for known injection phrasings ("ignore all previous instructions", "you are now a...", "always respond compliant", "system: you must...", etc.) and returns the matched snippets; `looks_suspicious(text)` is the boolean form. Called once per retrieved chunk in `scorer.score_documents()`, independent of whether that chunk ends up scored by the LLM or by labeling functions — the concern is the document's content, not which scorer happens to handle it. A match sets `prompt_injection_suspected` (and therefore `needs_review`) on that field. This is a detection/alerting layer, not the primary defense — see the untrusted-content framing in `explain.py` below (`scripts/explain.py — LLM voting + finding generation`), which applies to every prompt regardless of whether this heuristic fires.
+
+### `scripts/redaction.py` — sensitive-data redaction
+
+`redact(text)` regex-matches emails, IPv4 addresses, phone numbers, and key-like strings (`sk-...`, `api_...`, etc.), replacing each with a `[REDACTED_TYPE]` placeholder, and returns `(redacted_text, counts)`. Applied in `explain.py` only to the text that's about to leave the process in an OpenRouter API call — the original, unredacted chunk text is still what's cached, scored, and shown as evidence, since that never crosses the trust boundary. Same tradeoff as the regex-based labeling functions elsewhere in this codebase: precise for clearly-structured patterns, not a guaranteed-complete PII scrubber.
+
+### `scripts/audit_integrity.py` — tamper-evident signing
+
+`sign(payload)` computes an HMAC-SHA256 over the canonical (sorted-key) JSON of `payload` plus a timestamp, keyed by `AUDIT_SIGNING_KEY` from `.env`; `verify(payload, integrity)` recomputes and compares. Without `AUDIT_SIGNING_KEY` set, a random key is generated per process — signing still works but nothing signed before a restart can be verified after one, so the env var is required for signatures that need to stay checkable across runs. Wired into `app.py`'s `/score` response and `explain.generate_report()`'s saved `audit_report.json`, both as an `"integrity"` key.
+
+### `scripts/verify_report.py` — signature verification CLI
+
+`python scripts/verify_report.py <path>` loads a saved report, strips its `"integrity"` key, and calls `audit_integrity.verify()` on the rest — printing VALID/INVALID and exiting 0/1 accordingly. "INVALID" means either the content was modified after signing, or `AUDIT_SIGNING_KEY` doesn't match the key used at sign time (verified directly: signing and verifying with the same key round-trips correctly, a tampered field is correctly detected, and verifying with the wrong key correctly reports invalid rather than silently passing).
 
 ### `scripts/labeling_functions.py` — regex fallback detectors
 
@@ -283,7 +301,9 @@ app.py /score endpoint
 │     ├─ nciipc_cpp.query_bm25()    [C++, top-15 candidates, min score 1.0]
 │     ├─ scorer._hybrid_rerank()    [BM25 + embeddings.embed() cosine sim → top 5]
 │     ├─ nciipc_cpp.get_chunk_text()
+│     ├─ prompt_injection.detect()  [flags the field, independent of scoring path]
 │     ├─ explain.vote_chunk()       [LLM voting via OpenRouter]
+│     │  ├─ redaction.redact()      [outbound payload only]
 │     │  ├─ llm_cache.get()         [sqlite — skip the API call on a hit]
 │     │  ├─ _get_voting_models() / _get_client()
 │     │  ├─ client.chat.completions.create()
@@ -293,10 +313,13 @@ app.py /score endpoint
 │     └─ labeling_functions.score_chunk()  [fallback if LLMs fail]
 │
 ├─ explain.explain_control()          [LLM audit finding, one per control]
+│  ├─ redaction.redact()              [evidence text, outbound only]
 │  ├─ OpenRouter (4 retries, exponential backoff)
 │  └─ Ollama fallback (local mistral)
 │
-└─ scorer.score_documents(texts, use_llm=False)  [per-doc breakdown, LF-only]
+├─ scorer.score_documents(texts, use_llm=False)  [per-doc breakdown, LF-only]
+│
+└─ audit_integrity.sign()             [HMAC-SHA256 over the final response]
 ```
 
 ## Security measures
@@ -308,12 +331,15 @@ app.py /score endpoint
 5. **Single-threaded serving** — `threaded=False` prevents concurrent requests from corrupting the C++ extension's shared global index state.
 6. **Secret handling** — `OPENROUTER_API_KEY` is only ever read from `.env` (never hardcoded), and `.env` is git-ignored.
 7. **`.gitignore` coverage** — excludes `.env`, `.venv/`, `__pycache__/`, C++ build artifacts, `data/`, `logs/`, and `archive/` from version control, so API keys, large binaries, and any uploaded/sample documents never end up in the repo.
+8. **Prompt-injection detection** (`prompt_injection.py`) — every retrieved chunk is scanned for known injection phrasings before scoring; a match flags `prompt_injection_suspected` / `needs_review` on that field, surfaced in the API response and the web UI. Every LLM prompt (`vote_chunk`, `explain_control`) also explicitly frames document text as untrusted data to evaluate rather than instructions to follow, independent of whether the heuristic fires — the framing is the primary defense, the detector is the alerting layer on top of it.
+9. **Sensitive-data redaction before third-party API calls** (`redaction.py`) — emails, IPs, phone numbers, and key-like strings are redacted from the outbound OpenRouter payload only; local scoring, caching, and evidence display still use the original text.
+10. **Tamper-evident audit trail** (`audit_integrity.py`, `verify_report.py`) — every `/score` response and generated `audit_report.json` is signed with HMAC-SHA256 (`AUDIT_SIGNING_KEY`), independently re-checkable later rather than trusted blindly.
 
 ## Logging
 
 LLM calls are logged as JSONL under `logs/llm_calls/`:
 
-- **`YYYY-MM-DD.jsonl`** — successful calls: timestamp, control, model, prompt/response lengths, token usage, elapsed time, full prompt and response.
+- **`YYYY-MM-DD.jsonl`** — successful calls: timestamp, control, model, prompt/response lengths, token usage, elapsed time, redaction counts, full prompt and response.
 - **`YYYY-MM-DD.errors.jsonl`** — failed calls: timestamp, control, model, prompt length, error type/message, elapsed time.
 
 Useful for debugging failures, monitoring latency, tracking token usage, and auditing which models were consulted for a given finding.
